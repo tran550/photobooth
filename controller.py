@@ -12,6 +12,7 @@ import traceback
 
 _shutdown = False
 _preview_proc = None
+_cursor_hider_proc = None
 _current_device = None
 _current_format = None
 _current_size = None
@@ -44,6 +45,7 @@ PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 VINTAGE_MODE = os.getenv("VINTAGE_MODE", "crt").strip().lower()  # camcorder | crt | film | light | off
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
+HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 # Overlay controls
 OVERLAY_ENABLED = os.getenv("OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -621,6 +623,48 @@ def compositor_active():
         return False
 
 
+def start_cursor_hider():
+    global _cursor_hider_proc
+
+    if not HIDE_MOUSE_CURSOR:
+        return
+    if _cursor_hider_proc is not None and _cursor_hider_proc.poll() is None:
+        return
+
+    unclutter = shutil.which("unclutter")
+    if not unclutter:
+        print("Cursor hide requested but 'unclutter' is not installed; mouse pointer may remain visible.")
+        return
+
+    try:
+        # Keep running while preview is active so cursor stays hidden.
+        _cursor_hider_proc = subprocess.Popen(
+            [unclutter, "-idle", "0", "-root"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        print(f"Failed to start cursor hider: {exc}")
+
+
+def stop_cursor_hider():
+    global _cursor_hider_proc
+
+    if _cursor_hider_proc is None:
+        return
+
+    try:
+        if _cursor_hider_proc.poll() is None:
+            _cursor_hider_proc.terminate()
+            _cursor_hider_proc.wait(timeout=2)
+    except Exception:
+        try:
+            _cursor_hider_proc.kill()
+        except Exception:
+            pass
+    _cursor_hider_proc = None
+
+
 def kill_stale_preview_processes():
     # Prevent old ffplay/cvlc instances from holding /dev/video* and causing
     # "Invalid argument" / "No such device" loops.
@@ -640,6 +684,7 @@ def start_preview(video_device, profile):
     filter_chain = build_video_filter_chain()
 
     if compositor_active():
+        start_cursor_hider()
         ffplay = shutil.which("ffplay")
         if not ffplay:
             raise RuntimeError("ffplay not found. Install ffmpeg package.")
@@ -733,6 +778,7 @@ def stop_preview():
             pass
 
     _preview_proc = None
+    stop_cursor_hider()
 
 
 def start_with_retries(reason):
