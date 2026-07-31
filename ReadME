@@ -7,3 +7,59 @@ python3 apply_pi_device_settings.py
 Reload and restart service:
 sudo systemctl daemon-reload
 sudo systemctl restart photobooth-preview-root.service
+
+
+dependencies:
+
+Go to your project folder
+cd /home/bran/photobooth
+
+Install required system packages
+sudo apt update
+sudo apt install -y ffmpeg vlc python3-pip python3-pil python3-evdev usbutils libusb-1.0-0
+
+Install Python print library
+python3 -m pip install --upgrade pip
+python3 -m pip install python-escpos
+
+Give service user access to keyboard/printer device groups
+sudo usermod -aG input,lp,plugdev bran
+
+Reboot so group membership applies
+sudo reboot
+
+After reboot, go back to project folder
+cd /home/bran/photobooth
+
+Detect keyboard and printer candidates (optional report)
+python3 pi_device_helper.py
+
+Preview service updates without writing
+python3 apply_pi_device_settings.py --dry-run
+
+Apply detected service settings
+python3 apply_pi_device_settings.py
+
+Open service file and confirm these lines are set:
+
+PRINT_BACKEND=escpos
+KEYBOARD_EVENT_DEVICE=/dev/input/eventX
+Either PRINT_DEVICE_FILE=/dev/usb/lp0 or PRINT_USB_VENDOR_ID and PRINT_USB_PRODUCT_ID
+File: photobooth-preview-root.service
+Reload and restart service
+sudo systemctl daemon-reload
+sudo systemctl restart photobooth-preview-root.service
+
+Watch logs
+sudo journalctl -u photobooth-preview-root.service -n 120 --no-pager
+
+Live tail while pressing space
+sudo journalctl -u photobooth-preview-root.service -f
+
+If printer is 80mm, apply 80mm settings then restart service
+python3 apply_pi_device_settings.py --paper-width 80
+sudo systemctl restart photobooth-preview-root.service
+
+If USB-ID mode is needed instead of /dev/usb/lp0, run:
+python3 apply_pi_device_settings.py --printer-mode usb
+sudo systemctl restart photobooth-preview-root.service
