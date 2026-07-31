@@ -2,8 +2,10 @@ import glob
 import os
 import shutil
 import signal
+import select
 import subprocess
 import sys
+import threading
 import time
 import traceback
 
@@ -16,6 +18,10 @@ _current_size = None
 _current_framerate = None
 _last_start_ts = 0.0
 _warned_force_device_missing = False
+_last_capture_ts = 0.0
+_capture_in_progress = False
+_preview_lock = threading.Lock()
+_keyboard_listener_threads = []
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -49,6 +55,21 @@ OVERLAY_FONT_FILE = os.getenv("OVERLAY_FONT_FILE", "").strip()
 OVERLAY_FONT_SIZE = max(1, int(env_float("OVERLAY_FONT_SIZE", 28)))
 OVERLAY_FONT_COLOR = os.getenv("OVERLAY_FONT_COLOR", "white").strip() or "white"
 
+# Capture and print controls
+CAPTURE_KEY_ENABLED = os.getenv("CAPTURE_KEY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+CAPTURE_COOLDOWN_SEC = max(0.0, env_float("CAPTURE_COOLDOWN_SEC", 1.2))
+CAPTURE_PAUSE_PREVIEW = os.getenv("CAPTURE_PAUSE_PREVIEW", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+AUTO_PRINT_ENABLED = os.getenv("AUTO_PRINT_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+PRINT_BACKEND = os.getenv("PRINT_BACKEND", "none").strip().lower()  # none | escpos
+PRINT_PAPER_WIDTH_MM = max(1, int(env_float("PRINT_PAPER_WIDTH_MM", 58)))  # 58 or 80
+PRINT_HEAD_DOTS = max(1, int(env_float("PRINT_HEAD_DOTS", 384)))
+PRINT_DITHER = os.getenv("PRINT_DITHER", "1").strip().lower() not in {"0", "false", "off", "no"}
+PRINT_ROTATE = os.getenv("PRINT_ROTATE", "0").strip().lower() in {"1", "true", "on", "yes"}
+PRINT_USB_VENDOR_ID = os.getenv("PRINT_USB_VENDOR_ID", "").strip()
+PRINT_USB_PRODUCT_ID = os.getenv("PRINT_USB_PRODUCT_ID", "").strip()
+PRINT_DEVICE_FILE = os.getenv("PRINT_DEVICE_FILE", "").strip()  # ex: /dev/usb/lp0
+
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
     {"format": "mjpeg", "size": "720x480", "framerate": "30"},  # NTSC default
@@ -58,6 +79,253 @@ SOURCE_PROFILES = [
     {"format": "yuyv422", "size": "720x576", "framerate": "25"},
     {"format": None, "size": "640x480", "framerate": "25"},
 ]
+
+
+def preferred_print_width():
+    if PRINT_PAPER_WIDTH_MM >= 80:
+        return 576
+    return 384
+
+
+def parse_int(value, base=10):
+    try:
+        return int(value, base)
+    except Exception:
+        return None
+
+
+def capture_frame_bytes(video_device, profile, timeout_sec=8):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found. Install ffmpeg package.")
+
+    input_format = profile.get("format")
+    video_size = profile.get("size")
+    framerate = profile.get("framerate")
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "video4linux2",
+    ]
+    if input_format:
+        command.extend(["-input_format", input_format])
+    command.extend([
+        "-framerate",
+        framerate,
+        "-video_size",
+        video_size,
+        "-i",
+        video_device,
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "png",
+        "-",
+    ])
+
+    result = subprocess.run(command, capture_output=True, timeout=timeout_sec)
+    if result.returncode != 0 or not result.stdout:
+        err = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
+        raise RuntimeError(f"frame capture failed: {err or 'unknown error'}")
+    return result.stdout
+
+
+def print_image_bytes(image_bytes):
+    if not AUTO_PRINT_ENABLED:
+        print("Capture complete (auto print disabled).")
+        return
+
+    if PRINT_BACKEND == "none":
+        print("Capture complete. Printer backend is 'none', skipping print.")
+        return
+
+    try:
+        from io import BytesIO
+        from PIL import Image
+    except Exception as exc:
+        raise RuntimeError(f"Pillow import failed: {exc}") from exc
+
+    try:
+        from escpos.printer import File, Usb
+    except Exception as exc:
+        raise RuntimeError(f"python-escpos import failed: {exc}") from exc
+
+    try:
+        image = Image.open(BytesIO(image_bytes)).convert("L")
+        if PRINT_ROTATE:
+            image = image.rotate(90, expand=True)
+
+        target_width = PRINT_HEAD_DOTS if PRINT_HEAD_DOTS else preferred_print_width()
+        if target_width <= 0:
+            target_width = preferred_print_width()
+
+        if image.width != target_width:
+            ratio = target_width / float(max(1, image.width))
+            target_height = max(1, int(image.height * ratio))
+            image = image.resize((target_width, target_height), Image.Resampling.NEAREST)
+
+        if PRINT_DITHER:
+            image = image.convert("1")
+
+        printer = None
+        vendor_id = parse_int(PRINT_USB_VENDOR_ID, 0)
+        product_id = parse_int(PRINT_USB_PRODUCT_ID, 0)
+
+        if PRINT_DEVICE_FILE:
+            printer = File(PRINT_DEVICE_FILE)
+        elif vendor_id is not None and product_id is not None:
+            printer = Usb(vendor_id, product_id)
+        else:
+            raise RuntimeError("Printer target not configured. Set PRINT_DEVICE_FILE or PRINT_USB_VENDOR_ID/PRINT_USB_PRODUCT_ID.")
+
+        printer.image(image)
+        printer.cut()
+        printer.close()
+        print(f"Printed capture ({PRINT_PAPER_WIDTH_MM}mm, one copy).")
+    except Exception:
+        # Bubble up to caller for detailed controller logging.
+        raise
+
+
+def trigger_capture(source="space"):
+    del source
+    global _capture_in_progress, _last_capture_ts
+
+    if not CAPTURE_KEY_ENABLED:
+        return
+    if _capture_in_progress:
+        return
+
+    now = time.time()
+    if (now - _last_capture_ts) < CAPTURE_COOLDOWN_SEC:
+        return
+
+    _last_capture_ts = now
+    _capture_in_progress = True
+
+    def _capture_worker():
+        global _capture_in_progress
+        try:
+            with _preview_lock:
+                video_device = _current_device
+                profile = {
+                    "format": _current_format,
+                    "size": _current_size,
+                    "framerate": _current_framerate,
+                }
+                was_running = _preview_proc is not None and _preview_proc.poll() is None
+
+                if not video_device or not profile["size"] or not profile["framerate"]:
+                    print("Capture ignored: no active camera source.")
+                    return
+
+                print("Capturing frame...")
+                if CAPTURE_PAUSE_PREVIEW and was_running:
+                    stop_preview()
+
+                captured_bytes = capture_frame_bytes(video_device, profile)
+
+                if CAPTURE_PAUSE_PREVIEW and was_running and not _shutdown:
+                    start_preview(video_device, profile)
+
+            print_image_bytes(captured_bytes)
+        except Exception as exc:
+            # Attempt to recover preview if capture failed after stopping it.
+            try:
+                with _preview_lock:
+                    if _preview_proc is None and _current_device and _current_size and _current_framerate and not _shutdown:
+                        start_preview(
+                            _current_device,
+                            {
+                                "format": _current_format,
+                                "size": _current_size,
+                                "framerate": _current_framerate,
+                            },
+                        )
+            except Exception as restart_exc:
+                print(f"Preview recovery failed after capture error: {restart_exc}")
+            print(f"Capture/print failed: {exc}")
+        finally:
+            _capture_in_progress = False
+
+    threading.Thread(target=_capture_worker, daemon=True).start()
+
+
+def start_tty_space_listener():
+    if not CAPTURE_KEY_ENABLED:
+        return
+
+    if not sys.stdin or not sys.stdin.isatty():
+        print("Space capture listener: no TTY stdin; skipping TTY listener.")
+        return
+
+    def _listen():
+        print("Space capture listener: TTY mode enabled.")
+        while not _shutdown:
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if not ready:
+                    continue
+                ch = sys.stdin.read(1)
+                if ch == " ":
+                    trigger_capture("space")
+            except Exception:
+                time.sleep(0.2)
+
+    t = threading.Thread(target=_listen, daemon=True)
+    _keyboard_listener_threads.append(t)
+    t.start()
+
+
+def start_evdev_space_listener():
+    if not CAPTURE_KEY_ENABLED:
+        return
+
+    device_path = os.getenv("KEYBOARD_EVENT_DEVICE", "").strip()
+    if not device_path:
+        print("Space capture listener: KEYBOARD_EVENT_DEVICE not set; skipping evdev listener.")
+        return
+
+    try:
+        from evdev import InputDevice, ecodes
+    except Exception as exc:
+        print(f"Space capture listener: evdev unavailable ({exc}); skipping evdev listener.")
+        return
+
+    if not os.path.exists(device_path):
+        print(f"Space capture listener: device not found: {device_path}")
+        return
+
+    def _listen():
+        try:
+            dev = InputDevice(device_path)
+            print(f"Space capture listener: evdev mode on {device_path}")
+            for event in dev.read_loop():
+                if _shutdown:
+                    break
+                if event.type == ecodes.EV_KEY and event.code == ecodes.KEY_SPACE and event.value == 1:
+                    trigger_capture("space")
+        except Exception as exc:
+            print(f"Space capture listener: evdev error: {exc}")
+
+    t = threading.Thread(target=_listen, daemon=True)
+    _keyboard_listener_threads.append(t)
+    t.start()
+
+
+def start_capture_listeners():
+    if not CAPTURE_KEY_ENABLED:
+        print("Capture key listener disabled.")
+        return
+
+    start_evdev_space_listener()
+    start_tty_space_listener()
 
 
 def escape_drawtext_text(text):
@@ -490,10 +758,15 @@ def main():
     if _shutdown:
         return 0
 
+    start_capture_listeners()
     print("Live preview running. Press Ctrl+C to stop.")
 
     try:
         while not _shutdown:
+            if _capture_in_progress:
+                time.sleep(0.05)
+                continue
+
             if _current_device and not os.path.exists(_current_device):
                 print(f"Active device disappeared: {_current_device}. Re-probing...")
                 stop_preview()

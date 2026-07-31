@@ -1,0 +1,9 @@
+How to update service when printer is plugged in:
+
+Preview what it will set:
+python3 apply_pi_device_settings.py --dry-run
+Apply changes:
+python3 apply_pi_device_settings.py
+Reload and restart service:
+sudo systemctl daemon-reload
+sudo systemctl restart photobooth-preview-root.service

@@ -10,7 +10,7 @@ Group=bran
 WorkingDirectory=/home/bran/photobooth
 Environment=PYTHONUNBUFFERED=1
 Environment=VINTAGE_MODE=film
-Environment=CRT_OUTPUT_SIZE=800x600
+Environment=CRT_OUTPUT_SIZE=640x480
 Environment=OVERLAY_TEXT_FILE=/home/bran/photobooth/overlay_text.txt
 Environment=OVERLAY_CORNER=middle-bottom
 Environment=OVERLAY_FONT_SIZE=36
@@ -18,6 +18,19 @@ Environment=OVERLAY_FONT_COLOR=white
 Environment="OVERLAY_FONT_NAME=VCR OSD Mono"
 Environment=SHOW_REC_HUD=1
 Environment=PERIODIC_RESTART_SEC=0
+Environment=CAPTURE_KEY_ENABLED=1
+Environment=CAPTURE_COOLDOWN_SEC=1.2
+Environment=CAPTURE_PAUSE_PREVIEW=1
+Environment=AUTO_PRINT_ENABLED=1
+Environment=PRINT_BACKEND=none
+Environment=PRINT_PAPER_WIDTH_MM=58
+Environment=PRINT_HEAD_DOTS=384
+Environment=PRINT_DITHER=1
+Environment=PRINT_ROTATE=0
+Environment=PRINT_DEVICE_FILE=
+Environment=PRINT_USB_VENDOR_ID=
+Environment=PRINT_USB_PRODUCT_ID=
+Environment=KEYBOARD_EVENT_DEVICE=
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 ExecStart=/usr/bin/python3 -u /home/bran/photobooth/controller.py
