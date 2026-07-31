@@ -20,6 +20,7 @@ _last_start_ts = 0.0
 _warned_force_device_missing = False
 _last_capture_ts = 0.0
 _capture_in_progress = False
+_capture_state_lock = threading.Lock()
 _preview_lock = threading.Lock()
 _keyboard_listener_threads = []
 
@@ -54,6 +55,9 @@ OVERLAY_FONT_NAME = os.getenv("OVERLAY_FONT_NAME", "VCR OSD Mono").strip()
 OVERLAY_FONT_FILE = os.getenv("OVERLAY_FONT_FILE", "").strip()
 OVERLAY_FONT_SIZE = max(1, int(env_float("OVERLAY_FONT_SIZE", 28)))
 OVERLAY_FONT_COLOR = os.getenv("OVERLAY_FONT_COLOR", "white").strip() or "white"
+OVERLAY_BLOCKY_MODE = os.getenv("OVERLAY_BLOCKY_MODE", "1").strip().lower() not in {"0", "false", "off", "no"}
+OVERLAY_GLOW_ENABLED = os.getenv("OVERLAY_GLOW_ENABLED", "0").strip().lower() in {"1", "true", "on", "yes"}
+OVERLAY_REQUIRE_PIXEL_FONT = os.getenv("OVERLAY_REQUIRE_PIXEL_FONT", "0").strip().lower() in {"1", "true", "on", "yes"}
 
 # Capture and print controls
 CAPTURE_KEY_ENABLED = os.getenv("CAPTURE_KEY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -69,6 +73,7 @@ PRINT_ROTATE = os.getenv("PRINT_ROTATE", "0").strip().lower() in {"1", "true", "
 PRINT_USB_VENDOR_ID = os.getenv("PRINT_USB_VENDOR_ID", "").strip()
 PRINT_USB_PRODUCT_ID = os.getenv("PRINT_USB_PRODUCT_ID", "").strip()
 PRINT_DEVICE_FILE = os.getenv("PRINT_DEVICE_FILE", "").strip()  # ex: /dev/usb/lp0
+VINTAGE_SCALE_FLAGS = os.getenv("VINTAGE_SCALE_FLAGS", "neighbor").strip() or "neighbor"
 
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
@@ -199,15 +204,17 @@ def trigger_capture(source="space"):
 
     if not CAPTURE_KEY_ENABLED:
         return
-    if _capture_in_progress:
-        return
 
-    now = time.time()
-    if (now - _last_capture_ts) < CAPTURE_COOLDOWN_SEC:
-        return
+    with _capture_state_lock:
+        if _capture_in_progress:
+            return
 
-    _last_capture_ts = now
-    _capture_in_progress = True
+        now = time.time()
+        if (now - _last_capture_ts) < CAPTURE_COOLDOWN_SEC:
+            return
+
+        _last_capture_ts = now
+        _capture_in_progress = True
 
     def _capture_worker():
         global _capture_in_progress
@@ -252,7 +259,8 @@ def trigger_capture(source="space"):
                 print(f"Preview recovery failed after capture error: {restart_exc}")
             print(f"Capture/print failed: {exc}")
         finally:
-            _capture_in_progress = False
+            with _capture_state_lock:
+                _capture_in_progress = False
 
     threading.Thread(target=_capture_worker, daemon=True).start()
 
@@ -418,6 +426,11 @@ def build_overlay_filter():
             overlay_text = OVERLAY_TEXT
 
     chain = []
+    font_spec = find_fontfile(OVERLAY_FONT_NAME, OVERLAY_FONT_FILE)
+    if OVERLAY_REQUIRE_PIXEL_FONT and (not font_spec or not font_spec.startswith("fontfile=")):
+        print("Overlay text disabled: OVERLAY_REQUIRE_PIXEL_FONT is enabled but no usable font file was found.")
+        overlay_text = ""
+
     if SHOW_REC_HUD:
         chain.extend([
             # Camcorder-style REC marker.
@@ -428,9 +441,13 @@ def build_overlay_filter():
     if overlay_text:
         text_x, text_y, box_filter = overlay_layout(OVERLAY_CORNER)
         chain.append(box_filter)
-        chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#3fd7ff@0.14", "#3fd7ff@0.10", 8, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
-        chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#61e3ff@0.22", "#3fd7ff@0.16", 4, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
-        chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+        if OVERLAY_BLOCKY_MODE:
+            chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.92", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+        else:
+            if OVERLAY_GLOW_ENABLED:
+                chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#3fd7ff@0.14", "#3fd7ff@0.10", 8, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+                chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#61e3ff@0.22", "#3fd7ff@0.16", 4, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+            chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
 
     if not chain:
         return None
@@ -446,7 +463,7 @@ def build_vintage_filter():
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags=bilinear,"
+            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
             "eq=contrast=1.08:brightness=-0.01:saturation=0.96:gamma=0.99,"
             "colorbalance=rs=0.05:gs=0.02:bs=-0.03,"
             "noise=alls=8:allf=t+u,"
@@ -458,7 +475,7 @@ def build_vintage_filter():
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags=bilinear,"
+            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
             "eq=contrast=1.20:brightness=-0.02:saturation=0.88:gamma=1.05,"
             "hue=h=5:s=1.08,"
             "noise=alls=12:allf=t+u,"
@@ -471,7 +488,7 @@ def build_vintage_filter():
     base_chain = (
         "format=yuv420p,"
         "setsar=1,setdar=4/3,"
-        f"scale={CRT_OUTPUT_SIZE}:flags=bilinear,"
+        f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
         "eq=contrast=1.12:brightness=-0.01:saturation=1.02:gamma=1.02,"
         "hue=h=3:s=1.10,"
         "noise=alls=5:allf=t+u,"
@@ -482,7 +499,7 @@ def build_vintage_filter():
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags=bilinear,"
+            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
             "eq=contrast=1.07:brightness=0.00:saturation=1.06:gamma=1.01,"
             "hue=h=2:s=1.04"
         )

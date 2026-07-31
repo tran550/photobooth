@@ -16,6 +16,11 @@ Environment=OVERLAY_CORNER=middle-bottom
 Environment=OVERLAY_FONT_SIZE=36
 Environment=OVERLAY_FONT_COLOR=white
 Environment="OVERLAY_FONT_NAME=VCR OSD Mono"
+Environment=OVERLAY_FONT_FILE=/home/bran/photobooth/fonts/VCR_OSD_MONO_1.001.ttf
+Environment=OVERLAY_BLOCKY_MODE=1
+Environment=OVERLAY_GLOW_ENABLED=0
+Environment=OVERLAY_REQUIRE_PIXEL_FONT=0
+Environment=VINTAGE_SCALE_FLAGS=neighbor
 Environment=SHOW_REC_HUD=1
 Environment=PERIODIC_RESTART_SEC=0
 Environment=CAPTURE_KEY_ENABLED=1

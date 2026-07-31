@@ -131,6 +131,11 @@ def choose_targets(args) -> Dict[str, str]:
         else:
             selected_mode = "none"
 
+    if selected_mode == "usb" and (not usb_vendor or not usb_product):
+        raise ValueError("USB printer mode requires both vendor and product IDs.")
+    if selected_mode == "device" and not lp_device:
+        raise ValueError("Device printer mode requires a printer device file (for example /dev/usb/lp0).")
+
     backend = args.backend
     if selected_mode == "none":
         backend = "none"
@@ -207,7 +212,11 @@ def main() -> int:
         print(f"Service file not found: {service_path}")
         return 2
 
-    env_values = choose_targets(args)
+    try:
+        env_values = choose_targets(args)
+    except ValueError as exc:
+        print(f"Configuration error: {exc}")
+        return 2
     print_preview(service_path, env_values)
 
     if args.dry_run:
