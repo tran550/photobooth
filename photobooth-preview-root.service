@@ -9,7 +9,7 @@ User=bran
 Group=bran
 WorkingDirectory=/home/bran/photobooth
 Environment=PYTHONUNBUFFERED=1
-Environment=VINTAGE_MODE=film
+Environment=VINTAGE_MODE=crt
 Environment=CRT_OUTPUT_SIZE=640x480
 Environment=HIDE_MOUSE_CURSOR=1
 Environment=OVERLAY_TEXT_FILE=/home/bran/photobooth/overlay_text.txt
@@ -39,6 +39,7 @@ Environment=PRINT_USB_PRODUCT_ID=
 Environment=KEYBOARD_EVENT_DEVICE=
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStartPre=/usr/bin/bash -lc 'for i in {1..20}; do WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 /usr/bin/wlr-randr --output HDMI-A-1 --mode 640x480@60.048 && exit 0; sleep 0.5; done; exit 0'
 ExecStart=/usr/bin/python3 -u /home/bran/photobooth/controller.py
 Restart=on-failure
 RestartSec=2
