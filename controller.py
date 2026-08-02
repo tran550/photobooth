@@ -218,6 +218,29 @@ def capture_frame_bytes(video_device, profile, timeout_sec=8):
     return result.stdout
 
 
+def capture_frame_bytes_with_retries(video_device, profile, attempts=4):
+    last_exc = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return capture_frame_bytes(video_device, profile)
+        except Exception as exc:
+            last_exc = exc
+            message = str(exc).lower()
+            # The capture card can stay busy briefly after preview exit.
+            if "device or resource busy" in message:
+                time.sleep(0.18 * attempt)
+                continue
+            # Some USB cards return a transient bad first frame after reopen.
+            if "no jpeg data found" in message or "invalid data" in message:
+                time.sleep(0.12 * attempt)
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("frame capture failed after retries")
+
+
 def save_capture_bytes(image_bytes):
     if not CAPTURE_SAVE_ENABLED:
         return None
@@ -345,8 +368,11 @@ def trigger_capture(source="space"):
                 print("Capturing frame...")
                 if CAPTURE_PAUSE_PREVIEW and was_running:
                     stop_preview()
+                    # Ensure ffplay/cvlc fully releases /dev/video* before one-shot capture.
+                    kill_stale_preview_processes()
+                    time.sleep(0.2)
 
-                captured_bytes = capture_frame_bytes(video_device, profile)
+                captured_bytes = capture_frame_bytes_with_retries(video_device, profile)
 
                 if CAPTURE_PAUSE_PREVIEW and was_running and not _shutdown:
                     start_preview(video_device, profile)
