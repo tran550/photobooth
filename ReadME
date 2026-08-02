@@ -63,3 +63,30 @@ sudo systemctl restart photobooth-preview-root.service
 If USB-ID mode is needed instead of /dev/usb/lp0, run:
 python3 apply_pi_device_settings.py --printer-mode usb
 sudo systemctl restart photobooth-preview-root.service
+
+Save captures to disk (for Tailscale access)
+
+Service environment values:
+CAPTURE_SAVE_ENABLED=1
+CAPTURE_SAVE_DIR=/home/bran/photobooth/captures
+CAPTURE_SAVE_FORMAT=png
+AUTO_PRINT_ENABLED=0
+PRINT_BACKEND=none
+
+Create capture folder and set ownership:
+mkdir -p /home/bran/photobooth/captures
+chown bran:bran /home/bran/photobooth/captures
+
+Reload and restart service:
+sudo systemctl daemon-reload
+sudo systemctl restart photobooth-preview-root.service
+
+Install and connect Tailscale on the Pi:
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+
+Get the Pi Tailscale IP:
+tailscale ip -4
+
+After connecting your phone/laptop to the same Tailscale network,
+access photos in /home/bran/photobooth/captures using SFTP/SSH tools.

@@ -26,6 +26,7 @@ _preview_lock = threading.Lock()
 _keyboard_listener_threads = []
 _vintage_mode_lock = threading.Lock()
 _last_filter_switch_ts = 0.0
+_capture_save_lock = threading.Lock()
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -69,6 +70,10 @@ OVERLAY_REQUIRE_PIXEL_FONT = os.getenv("OVERLAY_REQUIRE_PIXEL_FONT", "0").strip(
 CAPTURE_KEY_ENABLED = os.getenv("CAPTURE_KEY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
 CAPTURE_COOLDOWN_SEC = max(0.0, env_float("CAPTURE_COOLDOWN_SEC", 1.2))
 CAPTURE_PAUSE_PREVIEW = os.getenv("CAPTURE_PAUSE_PREVIEW", "1").strip().lower() not in {"0", "false", "off", "no"}
+CAPTURE_SAVE_ENABLED = os.getenv("CAPTURE_SAVE_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+CAPTURE_SAVE_DIR = os.getenv("CAPTURE_SAVE_DIR", "/home/bran/photobooth/captures").strip() or "/home/bran/photobooth/captures"
+CAPTURE_SAVE_FORMAT = os.getenv("CAPTURE_SAVE_FORMAT", "png").strip().lower() or "png"
+CAPTURE_SAVE_JPEG_QUALITY = max(10, min(100, int(env_float("CAPTURE_SAVE_JPEG_QUALITY", 92))))
 
 AUTO_PRINT_ENABLED = os.getenv("AUTO_PRINT_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
 PRINT_BACKEND = os.getenv("PRINT_BACKEND", "none").strip().lower()  # none | escpos
@@ -213,6 +218,39 @@ def capture_frame_bytes(video_device, profile, timeout_sec=8):
     return result.stdout
 
 
+def save_capture_bytes(image_bytes):
+    if not CAPTURE_SAVE_ENABLED:
+        return None
+
+    ext = "png" if CAPTURE_SAVE_FORMAT not in {"jpg", "jpeg"} else "jpg"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    millis = int((time.time() % 1) * 1000)
+    mode = get_vintage_mode()
+    filename = f"capture_{timestamp}_{millis:03d}_{mode}.{ext}"
+
+    try:
+        with _capture_save_lock:
+            os.makedirs(CAPTURE_SAVE_DIR, exist_ok=True)
+            output_path = os.path.join(CAPTURE_SAVE_DIR, filename)
+
+            if ext == "png":
+                with open(output_path, "wb") as handle:
+                    handle.write(image_bytes)
+                return output_path
+
+            try:
+                from io import BytesIO
+                from PIL import Image
+            except Exception as exc:
+                raise RuntimeError(f"Pillow import failed for JPEG save: {exc}") from exc
+
+            image = Image.open(BytesIO(image_bytes)).convert("RGB")
+            image.save(output_path, format="JPEG", quality=CAPTURE_SAVE_JPEG_QUALITY, optimize=True)
+            return output_path
+    except Exception as exc:
+        raise RuntimeError(f"capture save failed: {exc}") from exc
+
+
 def print_image_bytes(image_bytes):
     if not AUTO_PRINT_ENABLED:
         print("Capture complete (auto print disabled).")
@@ -313,6 +351,9 @@ def trigger_capture(source="space"):
                 if CAPTURE_PAUSE_PREVIEW and was_running and not _shutdown:
                     start_preview(video_device, profile)
 
+            saved_path = save_capture_bytes(captured_bytes)
+            if saved_path:
+                print(f"Saved capture: {saved_path}")
             print_image_bytes(captured_bytes)
         except Exception as exc:
             # Attempt to recover preview if capture failed after stopping it.

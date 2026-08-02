@@ -28,8 +28,12 @@ Environment=PERIODIC_RESTART_SEC=0
 Environment=CAPTURE_KEY_ENABLED=1
 Environment=CAPTURE_COOLDOWN_SEC=1.2
 Environment=CAPTURE_PAUSE_PREVIEW=1
-Environment=AUTO_PRINT_ENABLED=1
-Environment=PRINT_BACKEND=escpos
+Environment=CAPTURE_SAVE_ENABLED=1
+Environment=CAPTURE_SAVE_DIR=/home/bran/photobooth/captures
+Environment=CAPTURE_SAVE_FORMAT=png
+Environment=CAPTURE_SAVE_JPEG_QUALITY=92
+Environment=AUTO_PRINT_ENABLED=0
+Environment=PRINT_BACKEND=none
 Environment=PRINT_PAPER_WIDTH_MM=58
 Environment=PRINT_HEAD_DOTS=384
 Environment=PRINT_DITHER=1
