@@ -177,24 +177,14 @@ def stop_cover_overlay(proc):
 def restart_preview_after_mode_change(video_device, profile):
     global _cover_proc
 
-    old_proc = _preview_proc
-
-    # Attempt seamless handoff first. Some devices allow a second open.
-    if old_proc is not None and old_proc.poll() is None:
-        try:
-            start_preview(video_device, profile)
-            if old_proc is not _preview_proc:
-                stop_preview_process(old_proc)
-            return
-        except Exception as exc:
-            print(f"Seamless filter switch not supported on this capture device: {exc}")
-
-    # Fallback for single-open capture hardware.
+    # Deterministic transition: always hide compositor with a black cover,
+    # then restart preview. This avoids desktop peeking on single-open UVC cards.
     _cover_proc = start_cover_overlay()
     stop_preview()
     try:
         if not _shutdown:
             start_preview(video_device, profile)
+            time.sleep(0.12)
     finally:
         stop_cover_overlay(_cover_proc)
         _cover_proc = None
@@ -632,12 +622,13 @@ def build_overlay_filter():
 
     if toast_text and toast_sec > 0:
         # Keep this simple and explicit for maximum ffmpeg filter compatibility.
+        chain.append(f"drawbox=x=(w*0.22):y=(h*0.42):w=(w*0.56):h=56:color=black@0.72:t=fill:enable='lt(t,{toast_sec:.3f})'")
         chain.append(
             drawtext_filter(
                 toast_text,
                 "(w-text_w)/2",
-                "36",
-                max(22, int(OVERLAY_FONT_SIZE * 0.9)),
+                "(h*0.42)+14",
+                max(24, int(OVERLAY_FONT_SIZE * 0.95)),
                 "white",
                 "black@1.0",
                 3,
