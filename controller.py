@@ -25,6 +25,9 @@ _capture_state_lock = threading.Lock()
 _preview_lock = threading.Lock()
 _keyboard_listener_threads = []
 _vintage_mode_lock = threading.Lock()
+_filter_toast_lock = threading.Lock()
+_filter_toast_text = ""
+_filter_toast_seconds = 0.0
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -48,6 +51,7 @@ VINTAGE_MODE_SEQUENCE = ["off", "light", "film", "crt", "camcorder"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
+FILTER_TOAST_SEC = max(0.0, env_float("FILTER_TOAST_SEC", 1.0))
 
 # Overlay controls
 OVERLAY_ENABLED = os.getenv("OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -91,6 +95,68 @@ def set_vintage_mode(mode):
         VINTAGE_MODE = mode
 
 
+def vintage_mode_label(mode):
+    labels = {
+        "off": "Filter: Off",
+        "light": "Filter: Light",
+        "film": "Filter: Film",
+        "crt": "Filter: CRT",
+        "camcorder": "Filter: Camcorder",
+    }
+    return labels.get(mode, f"Filter: {mode}")
+
+
+def queue_filter_toast(text, seconds):
+    global _filter_toast_text, _filter_toast_seconds
+    with _filter_toast_lock:
+        _filter_toast_text = text
+        _filter_toast_seconds = max(0.0, seconds)
+
+
+def consume_filter_toast():
+    global _filter_toast_text, _filter_toast_seconds
+    with _filter_toast_lock:
+        text = _filter_toast_text
+        seconds = _filter_toast_seconds
+        _filter_toast_text = ""
+        _filter_toast_seconds = 0.0
+        return text, seconds
+
+
+def stop_preview_process(proc):
+    if proc is None:
+        return
+
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def restart_preview_after_mode_change(video_device, profile):
+    old_proc = _preview_proc
+
+    # Attempt seamless handoff first. Some devices allow a second open.
+    if old_proc is not None and old_proc.poll() is None:
+        try:
+            start_preview(video_device, profile)
+            if old_proc is not _preview_proc:
+                stop_preview_process(old_proc)
+            return
+        except Exception as exc:
+            print(f"Seamless filter switch not supported on this capture device: {exc}")
+
+    # Fallback for single-open capture hardware.
+    stop_preview()
+    if not _shutdown:
+        start_preview(video_device, profile)
+
+
 def cycle_vintage_mode(direction):
     current_mode = get_vintage_mode()
     if current_mode not in VINTAGE_MODE_SEQUENCE:
@@ -112,12 +178,11 @@ def cycle_vintage_mode(direction):
             "framerate": _current_framerate,
         }
         set_vintage_mode(next_mode)
+        queue_filter_toast(vintage_mode_label(next_mode), FILTER_TOAST_SEC)
         print(f"Vintage mode changed: {current_mode} -> {next_mode}")
 
         if was_running and video_device and profile["size"] and profile["framerate"]:
-            stop_preview()
-            if not _shutdown:
-                start_preview(video_device, profile)
+            restart_preview_after_mode_change(video_device, profile)
 
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
@@ -486,11 +551,10 @@ def overlay_layout(position):
 
 
 def build_overlay_filter():
-    if not OVERLAY_ENABLED:
-        return None
+    toast_text, toast_sec = consume_filter_toast()
 
     overlay_text = OVERLAY_TEXT
-    if not overlay_text and OVERLAY_TEXT_FILE and os.path.exists(OVERLAY_TEXT_FILE):
+    if OVERLAY_ENABLED and not overlay_text and OVERLAY_TEXT_FILE and os.path.exists(OVERLAY_TEXT_FILE):
         try:
             with open(OVERLAY_TEXT_FILE, "r", encoding="utf-8") as f:
                 overlay_text = f.read().strip()
@@ -499,27 +563,47 @@ def build_overlay_filter():
 
     chain = []
     font_spec = find_fontfile(OVERLAY_FONT_NAME, OVERLAY_FONT_FILE)
-    if OVERLAY_REQUIRE_PIXEL_FONT and (not font_spec or not font_spec.startswith("fontfile=")):
-        print("Overlay text disabled: OVERLAY_REQUIRE_PIXEL_FONT is enabled but no usable font file was found.")
-        overlay_text = ""
 
-    if SHOW_REC_HUD:
+    if OVERLAY_ENABLED:
+        if OVERLAY_REQUIRE_PIXEL_FONT and (not font_spec or not font_spec.startswith("fontfile=")):
+            print("Overlay text disabled: OVERLAY_REQUIRE_PIXEL_FONT is enabled but no usable font file was found.")
+            overlay_text = ""
+
+        if SHOW_REC_HUD:
+            chain.extend([
+                # Camcorder-style REC marker.
+                "drawbox=x=30:y=30:w=14:h=14:color=red@0.95:t=fill:enable='lt(mod(t,1),0.5)'",
+                drawtext_filter("REC", "52", "23", 24, "white", "black@0.8", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE),
+            ])
+
+        if overlay_text:
+            text_x, text_y, box_filter = overlay_layout(OVERLAY_CORNER)
+            chain.append(box_filter)
+            if OVERLAY_BLOCKY_MODE:
+                chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.92", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+            else:
+                if OVERLAY_GLOW_ENABLED:
+                    chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#3fd7ff@0.14", "#3fd7ff@0.10", 8, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+                    chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#61e3ff@0.22", "#3fd7ff@0.16", 4, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+                chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+
+    if toast_text and toast_sec > 0:
+        toast_text = escape_drawtext_text(toast_text)
         chain.extend([
-            # Camcorder-style REC marker.
-            "drawbox=x=30:y=30:w=14:h=14:color=red@0.95:t=fill:enable='lt(mod(t,1),0.5)'",
-            drawtext_filter("REC", "52", "23", 24, "white", "black@0.8", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE),
+            f"drawbox=x=(w*0.22):y=26:w=(w*0.56):h=52:color=black@0.55:t=fill:enable='lt(t,{toast_sec:.3f})'",
+            "drawbox=x=(w*0.22):y=26:w=(w*0.56):h=52:color=white@0.20:t=2:enable='lt(t,{:.3f})'".format(toast_sec),
+            drawtext_filter(
+                toast_text,
+                "(w-text_w)/2",
+                "42",
+                max(18, int(OVERLAY_FONT_SIZE * 0.8)),
+                "white",
+                "black@0.9",
+                2,
+                OVERLAY_FONT_NAME,
+                OVERLAY_FONT_FILE,
+            ) + f":enable='lt(t,{toast_sec:.3f})'",
         ])
-
-    if overlay_text:
-        text_x, text_y, box_filter = overlay_layout(OVERLAY_CORNER)
-        chain.append(box_filter)
-        if OVERLAY_BLOCKY_MODE:
-            chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.92", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
-        else:
-            if OVERLAY_GLOW_ENABLED:
-                chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#3fd7ff@0.14", "#3fd7ff@0.10", 8, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
-                chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#61e3ff@0.22", "#3fd7ff@0.16", 4, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
-            chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
 
     if not chain:
         return None
