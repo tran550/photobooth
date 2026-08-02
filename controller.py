@@ -45,8 +45,8 @@ PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 FILTER_SWITCH_COOLDOWN_SEC = max(0.0, env_float("FILTER_SWITCH_COOLDOWN_SEC", 0.22))
 
 # Filter controls
-VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi | rainbow_motion | neon_outline | rgb_chaos
-VINTAGE_MODE_SEQUENCE = ["base", "vhs", "cyber_glitch", "pixel_lofi", "rainbow_motion", "neon_outline", "rgb_chaos"]
+VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi | rgb_chaos
+VINTAGE_MODE_SEQUENCE = ["base", "vhs", "cyber_glitch", "pixel_lofi", "rgb_chaos"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -91,8 +91,6 @@ def normalize_filter_mode(mode):
         "glitch": "cyber_glitch",
         "pixel": "pixel_lofi",
         "lofi": "pixel_lofi",
-        "rainbow": "rainbow_motion",
-        "neon": "neon_outline",
         "rgb": "rgb_chaos",
     }
     mode = aliases.get(mode, mode)
@@ -604,30 +602,6 @@ def build_vintage_filter():
             "drawgrid=width=3:height=3:thickness=1:color=black@0.14"
         )
 
-    if vintage_mode == "rainbow_motion":
-        # Movement-driven rainbow energy with vivid trails.
-        return (
-            "format=yuv420p,"
-            "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "tblend=all_mode=difference128,"
-            "hue=h='mod(t*260,360)':s=2.30,"
-            "eq=contrast=1.42:brightness=-0.01:saturation=1.95:gamma=1.08,"
-            "noise=alls=8:allf=t+u"
-        )
-
-    if vintage_mode == "neon_outline":
-        # Sharp neon edges for a posterized electric look.
-        return (
-            "format=yuv420p,"
-            "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "edgedetect=low=0.06:high=0.20,"
-            "negate,"
-            "hue=h=165:s=2.10,"
-            "eq=contrast=1.55:brightness=0.03:saturation=1.70"
-        )
-
     if vintage_mode == "rgb_chaos":
         # Aggressive RGB channel split and gritty glitch texture.
         return (
@@ -635,8 +609,10 @@ def build_vintage_filter():
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
             "rgbashift=rh=4:rv=2:gh=-3:gv=-2:bh=-7:bv=3,"
-            "noise=alls=13:allf=t+u,"
-            "eq=contrast=1.38:brightness=-0.02:saturation=1.75:gamma=1.08,"
+            "noise=alls=11:allf=t+u,"
+            "eq=contrast=1.34:brightness=-0.01:saturation=1.38:gamma=1.06,"
+            "hue=h=16:s=1.24,"
+            "colorbalance=rs=0.06:gs=-0.10:bs=0.04,"
             "drawgrid=width=iw:height=3:thickness=1:color=black@0.18"
         )
 
