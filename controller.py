@@ -13,6 +13,7 @@ import traceback
 _shutdown = False
 _preview_proc = None
 _cursor_hider_proc = None
+_cover_proc = None
 _current_device = None
 _current_format = None
 _current_size = None
@@ -113,14 +114,16 @@ def queue_filter_toast(text, seconds):
         _filter_toast_seconds = max(0.0, seconds)
 
 
-def consume_filter_toast():
+def peek_filter_toast():
+    with _filter_toast_lock:
+        return _filter_toast_text, _filter_toast_seconds
+
+
+def clear_filter_toast():
     global _filter_toast_text, _filter_toast_seconds
     with _filter_toast_lock:
-        text = _filter_toast_text
-        seconds = _filter_toast_seconds
         _filter_toast_text = ""
         _filter_toast_seconds = 0.0
-        return text, seconds
 
 
 def stop_preview_process(proc):
@@ -138,7 +141,41 @@ def stop_preview_process(proc):
             pass
 
 
+def start_cover_overlay():
+    ffplay = shutil.which("ffplay")
+    if not ffplay:
+        return None
+
+    command = [
+        ffplay,
+        "-hide_banner",
+        "-nostats",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={CRT_OUTPUT_SIZE}:r=60",
+        "-fs",
+        "-noborder",
+    ]
+    try:
+        proc = subprocess.Popen(command)
+        time.sleep(0.1)
+        if proc.poll() is not None:
+            return None
+        return proc
+    except Exception:
+        return None
+
+
+def stop_cover_overlay(proc):
+    stop_preview_process(proc)
+
+
 def restart_preview_after_mode_change(video_device, profile):
+    global _cover_proc
+
     old_proc = _preview_proc
 
     # Attempt seamless handoff first. Some devices allow a second open.
@@ -152,9 +189,14 @@ def restart_preview_after_mode_change(video_device, profile):
             print(f"Seamless filter switch not supported on this capture device: {exc}")
 
     # Fallback for single-open capture hardware.
+    _cover_proc = start_cover_overlay()
     stop_preview()
-    if not _shutdown:
-        start_preview(video_device, profile)
+    try:
+        if not _shutdown:
+            start_preview(video_device, profile)
+    finally:
+        stop_cover_overlay(_cover_proc)
+        _cover_proc = None
 
 
 def cycle_vintage_mode(direction):
@@ -551,7 +593,7 @@ def overlay_layout(position):
 
 
 def build_overlay_filter():
-    toast_text, toast_sec = consume_filter_toast()
+    toast_text, toast_sec = peek_filter_toast()
 
     overlay_text = OVERLAY_TEXT
     if OVERLAY_ENABLED and not overlay_text and OVERLAY_TEXT_FILE and os.path.exists(OVERLAY_TEXT_FILE):
@@ -926,6 +968,7 @@ def start_preview(video_device, profile):
     _current_size = video_size
     _current_framerate = framerate
     _last_start_ts = time.time()
+    clear_filter_toast()
 
 
 def stop_preview():
