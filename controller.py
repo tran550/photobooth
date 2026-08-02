@@ -609,10 +609,10 @@ def build_vintage_filter():
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
             "rgbashift=rh=4:rv=2:gh=-3:gv=-2:bh=-7:bv=3,"
-            "noise=alls=11:allf=t+u,"
-            "eq=contrast=1.34:brightness=-0.01:saturation=1.38:gamma=1.06,"
-            "hue=h=16:s=1.24,"
-            "colorbalance=rs=0.06:gs=-0.10:bs=0.04,"
+            "noise=alls=10:allf=t+u,"
+            "eq=contrast=1.30:brightness=0.00:saturation=1.28:gamma=1.05,"
+            "hue=h=6:s=1.12,"
+            "colorbalance=rs=0.14:gs=-0.24:bs=0.10,"
             "drawgrid=width=iw:height=3:thickness=1:color=black@0.18"
         )
 
