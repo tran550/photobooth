@@ -176,7 +176,7 @@ def parse_int(value, base=10):
         return None
 
 
-def capture_frame_bytes(video_device, profile, timeout_sec=8):
+def capture_frame_bytes(video_device, profile, filter_chain=None, timeout_sec=8):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg not found. Install ffmpeg package.")
@@ -202,6 +202,12 @@ def capture_frame_bytes(video_device, profile, timeout_sec=8):
         video_size,
         "-i",
         video_device,
+    ])
+
+    if filter_chain:
+        command.extend(["-vf", filter_chain])
+
+    command.extend([
         "-frames:v",
         "1",
         "-f",
@@ -218,11 +224,11 @@ def capture_frame_bytes(video_device, profile, timeout_sec=8):
     return result.stdout
 
 
-def capture_frame_bytes_with_retries(video_device, profile, attempts=4):
+def capture_frame_bytes_with_retries(video_device, profile, filter_chain=None, attempts=4):
     last_exc = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            return capture_frame_bytes(video_device, profile)
+            return capture_frame_bytes(video_device, profile, filter_chain=filter_chain)
         except Exception as exc:
             last_exc = exc
             message = str(exc).lower()
@@ -359,6 +365,7 @@ def trigger_capture(source="space"):
                     "size": _current_size,
                     "framerate": _current_framerate,
                 }
+                capture_filter_chain = build_video_filter_chain()
                 was_running = _preview_proc is not None and _preview_proc.poll() is None
 
                 if not video_device or not profile["size"] or not profile["framerate"]:
@@ -372,7 +379,7 @@ def trigger_capture(source="space"):
                     kill_stale_preview_processes()
                     time.sleep(0.2)
 
-                captured_bytes = capture_frame_bytes_with_retries(video_device, profile)
+                captured_bytes = capture_frame_bytes_with_retries(video_device, profile, filter_chain=capture_filter_chain)
 
                 if CAPTURE_PAUSE_PREVIEW and was_running and not _shutdown:
                     start_preview(video_device, profile)
