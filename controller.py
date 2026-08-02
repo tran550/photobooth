@@ -45,8 +45,8 @@ PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 FILTER_SWITCH_COOLDOWN_SEC = max(0.0, env_float("FILTER_SWITCH_COOLDOWN_SEC", 0.22))
 
 # Filter controls
-VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi | rgb_chaos
-VINTAGE_MODE_SEQUENCE = ["base", "vhs", "cyber_glitch", "pixel_lofi", "rgb_chaos"]
+VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi
+VINTAGE_MODE_SEQUENCE = ["base", "vhs", "cyber_glitch", "pixel_lofi"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -91,7 +91,6 @@ def normalize_filter_mode(mode):
         "glitch": "cyber_glitch",
         "pixel": "pixel_lofi",
         "lofi": "pixel_lofi",
-        "rgb": "rgb_chaos",
     }
     mode = aliases.get(mode, mode)
     if mode in VINTAGE_MODE_SEQUENCE:
@@ -603,20 +602,6 @@ def build_vintage_filter():
             "eq=contrast=1.28:brightness=-0.04:saturation=1.42:gamma=1.08,"
             "noise=alls=9:allf=t+u,"
             "drawgrid=width=3:height=3:thickness=1:color=black@0.14"
-        )
-
-    if vintage_mode == "rgb_chaos":
-        # Aggressive RGB channel split and gritty glitch texture.
-        return (
-            "format=yuv420p,"
-            "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "rgbashift=rh=4:rv=2:gh=-3:gv=-2:bh=-7:bv=3,"
-            "noise=alls=10:allf=t+u,"
-            "eq=contrast=1.30:brightness=0.00:saturation=1.28:gamma=1.05,"
-            "hue=h=6:s=1.12,"
-            "colorbalance=rs=0.14:gs=-0.24:bs=0.10,"
-            "drawgrid=width=iw:height=3:thickness=1:color=black@0.18"
         )
 
     # Any unknown value falls back to base camera output.
