@@ -24,6 +24,7 @@ _capture_in_progress = False
 _capture_state_lock = threading.Lock()
 _preview_lock = threading.Lock()
 _keyboard_listener_threads = []
+_vintage_mode_lock = threading.Lock()
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -43,6 +44,7 @@ PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 
 # Vintage look controls (override with env vars if needed)
 VINTAGE_MODE = os.getenv("VINTAGE_MODE", "crt").strip().lower()  # camcorder | crt | film | light | off
+VINTAGE_MODE_SEQUENCE = ["off", "light", "film", "crt", "camcorder"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -76,6 +78,46 @@ PRINT_USB_VENDOR_ID = os.getenv("PRINT_USB_VENDOR_ID", "").strip()
 PRINT_USB_PRODUCT_ID = os.getenv("PRINT_USB_PRODUCT_ID", "").strip()
 PRINT_DEVICE_FILE = os.getenv("PRINT_DEVICE_FILE", "").strip()  # ex: /dev/usb/lp0
 VINTAGE_SCALE_FLAGS = os.getenv("VINTAGE_SCALE_FLAGS", "neighbor").strip() or "neighbor"
+
+
+def get_vintage_mode():
+    with _vintage_mode_lock:
+        return VINTAGE_MODE
+
+
+def set_vintage_mode(mode):
+    global VINTAGE_MODE
+    with _vintage_mode_lock:
+        VINTAGE_MODE = mode
+
+
+def cycle_vintage_mode(direction):
+    current_mode = get_vintage_mode()
+    if current_mode not in VINTAGE_MODE_SEQUENCE:
+        current_index = VINTAGE_MODE_SEQUENCE.index("crt")
+    else:
+        current_index = VINTAGE_MODE_SEQUENCE.index(current_mode)
+
+    next_index = (current_index + direction) % len(VINTAGE_MODE_SEQUENCE)
+    next_mode = VINTAGE_MODE_SEQUENCE[next_index]
+    if next_mode == current_mode:
+        return
+
+    with _preview_lock:
+        was_running = _preview_proc is not None and _preview_proc.poll() is None
+        video_device = _current_device
+        profile = {
+            "format": _current_format,
+            "size": _current_size,
+            "framerate": _current_framerate,
+        }
+        set_vintage_mode(next_mode)
+        print(f"Vintage mode changed: {current_mode} -> {next_mode}")
+
+        if was_running and video_device and profile["size"] and profile["framerate"]:
+            stop_preview()
+            if not _shutdown:
+                start_preview(video_device, profile)
 
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
@@ -267,6 +309,16 @@ def trigger_capture(source="space"):
     threading.Thread(target=_capture_worker, daemon=True).start()
 
 
+def trigger_filter_cycle(direction):
+    if direction not in {-1, 1}:
+        return
+
+    try:
+        cycle_vintage_mode(direction)
+    except Exception as exc:
+        print(f"Filter cycle failed: {exc}")
+
+
 def start_tty_space_listener():
     if not CAPTURE_KEY_ENABLED:
         return
@@ -276,7 +328,7 @@ def start_tty_space_listener():
         return
 
     def _listen():
-        print("Space capture listener: TTY mode enabled.")
+        print("Capture/filter listener: TTY mode enabled (space + up/down arrows).")
         while not _shutdown:
             try:
                 ready, _, _ = select.select([sys.stdin], [], [], 0.2)
@@ -285,6 +337,18 @@ def start_tty_space_listener():
                 ch = sys.stdin.read(1)
                 if ch == " ":
                     trigger_capture("space")
+                elif ch == "\x1b":
+                    seq = ""
+                    for _ in range(2):
+                        next_ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        if not next_ready:
+                            break
+                        seq += sys.stdin.read(1)
+
+                    if seq == "[A":
+                        trigger_filter_cycle(1)
+                    elif seq == "[B":
+                        trigger_filter_cycle(-1)
             except Exception:
                 time.sleep(0.2)
 
@@ -315,12 +379,18 @@ def start_evdev_space_listener():
     def _listen():
         try:
             dev = InputDevice(device_path)
-            print(f"Space capture listener: evdev mode on {device_path}")
+            print(f"Capture/filter listener: evdev mode on {device_path} (space + up/down arrows)")
             for event in dev.read_loop():
                 if _shutdown:
                     break
-                if event.type == ecodes.EV_KEY and event.code == ecodes.KEY_SPACE and event.value == 1:
+                if event.type != ecodes.EV_KEY or event.value != 1:
+                    continue
+                if event.code == ecodes.KEY_SPACE:
                     trigger_capture("space")
+                elif event.code in {ecodes.KEY_UP, ecodes.KEY_KP8}:
+                    trigger_filter_cycle(1)
+                elif event.code in {ecodes.KEY_DOWN, ecodes.KEY_KP2}:
+                    trigger_filter_cycle(-1)
         except Exception as exc:
             print(f"Space capture listener: evdev error: {exc}")
 
@@ -457,10 +527,12 @@ def build_overlay_filter():
 
 
 def build_vintage_filter():
-    if VINTAGE_MODE in {"off", "none", "0", "false"}:
+    vintage_mode = get_vintage_mode()
+
+    if vintage_mode in {"off", "none", "0", "false"}:
         return None
 
-    if VINTAGE_MODE == "film":
+    if vintage_mode == "film":
         # Softer contrast curve, warm bias, and fine grain for a filmic look.
         return (
             "format=yuv420p,"
@@ -473,7 +545,7 @@ def build_vintage_filter():
             "vignette=PI/9"
         )
 
-    if VINTAGE_MODE == "camcorder":
+    if vintage_mode == "camcorder":
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
@@ -486,18 +558,7 @@ def build_vintage_filter():
             "drawgrid=width=iw:height=3:thickness=1:color=black@0.16"
         )
 
-    # Keep a stable 4:3 image for CRT displays and add analog character.
-    base_chain = (
-        "format=yuv420p,"
-        "setsar=1,setdar=4/3,"
-        f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-        "eq=contrast=1.12:brightness=-0.01:saturation=1.02:gamma=1.02,"
-        "hue=h=3:s=1.10,"
-        "noise=alls=5:allf=t+u,"
-        "drawgrid=width=iw:height=4:thickness=1:color=black@0.10"
-    )
-
-    if VINTAGE_MODE == "light":
+    if vintage_mode == "light":
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
@@ -506,7 +567,29 @@ def build_vintage_filter():
             "hue=h=2:s=1.04"
         )
 
-    return base_chain
+    if vintage_mode == "crt":
+        # Aggressive scanline pass with stronger line density and contrast.
+        return (
+            "format=yuv420p,"
+            "setsar=1,setdar=4/3,"
+            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
+            "eq=contrast=1.18:brightness=-0.03:saturation=1.06:gamma=1.04,"
+            "hue=h=2:s=1.08,"
+            "noise=alls=7:allf=t+u,"
+            "drawgrid=width=iw:height=2:thickness=1:color=black@0.38,"
+            "drawgrid=width=iw:height=2:thickness=1:color=black@0.20:y=1"
+        )
+
+    # Unknown mode fallback keeps a moderate analog character.
+    return (
+        "format=yuv420p,"
+        "setsar=1,setdar=4/3,"
+        f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
+        "eq=contrast=1.12:brightness=-0.01:saturation=1.02:gamma=1.02,"
+        "hue=h=3:s=1.10,"
+        "noise=alls=5:allf=t+u,"
+        "drawgrid=width=iw:height=3:thickness=1:color=black@0.18"
+    )
 
 
 def build_video_filter_chain():
@@ -723,7 +806,7 @@ def start_preview(video_device, profile):
             "-noborder",
         ])
         print("Preview mode: compositor fullscreen (ffplay)")
-        print(f"Vintage mode: {VINTAGE_MODE}, overlay: {'on' if OVERLAY_ENABLED else 'off'}")
+        print(f"Vintage mode: {get_vintage_mode()}, overlay: {'on' if OVERLAY_ENABLED else 'off'}")
         if OVERLAY_TEXT:
             print(f"Overlay text (env): {OVERLAY_TEXT}")
         elif OVERLAY_TEXT_FILE:
