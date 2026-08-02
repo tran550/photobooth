@@ -13,7 +13,6 @@ import traceback
 _shutdown = False
 _preview_proc = None
 _cursor_hider_proc = None
-_cover_proc = None
 _current_device = None
 _current_format = None
 _current_size = None
@@ -26,9 +25,6 @@ _capture_state_lock = threading.Lock()
 _preview_lock = threading.Lock()
 _keyboard_listener_threads = []
 _vintage_mode_lock = threading.Lock()
-_filter_toast_lock = threading.Lock()
-_filter_toast_text = ""
-_filter_toast_seconds = 0.0
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -46,13 +42,12 @@ def env_float(name, default):
 
 PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 
-# Vintage look controls (override with env vars if needed)
-VINTAGE_MODE = os.getenv("VINTAGE_MODE", "crt").strip().lower()  # camcorder | crt | film | light | off
-VINTAGE_MODE_SEQUENCE = ["off", "light", "film", "crt", "camcorder"]
+# Filter controls
+VINTAGE_MODE = os.getenv("VINTAGE_MODE", "retro").strip().lower()  # base | retro
+VINTAGE_MODE_SEQUENCE = ["base", "retro"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
-FILTER_TOAST_SEC = max(0.0, env_float("FILTER_TOAST_SEC", 1.0))
 
 # Overlay controls
 OVERLAY_ENABLED = os.getenv("OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -96,104 +91,10 @@ def set_vintage_mode(mode):
         VINTAGE_MODE = mode
 
 
-def vintage_mode_label(mode):
-    labels = {
-        "off": "Filter: Off",
-        "light": "Filter: Light",
-        "film": "Filter: Film",
-        "crt": "Filter: CRT",
-        "camcorder": "Filter: Camcorder",
-    }
-    return labels.get(mode, f"Filter: {mode}")
-
-
-def queue_filter_toast(text, seconds):
-    global _filter_toast_text, _filter_toast_seconds
-    with _filter_toast_lock:
-        _filter_toast_text = text
-        _filter_toast_seconds = max(0.0, seconds)
-
-
-def peek_filter_toast():
-    with _filter_toast_lock:
-        return _filter_toast_text, _filter_toast_seconds
-
-
-def clear_filter_toast():
-    global _filter_toast_text, _filter_toast_seconds
-    with _filter_toast_lock:
-        _filter_toast_text = ""
-        _filter_toast_seconds = 0.0
-
-
-def stop_preview_process(proc):
-    if proc is None:
-        return
-
-    try:
-        if proc.poll() is None:
-            proc.terminate()
-            proc.wait(timeout=2)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-
-def start_cover_overlay():
-    ffplay = shutil.which("ffplay")
-    if not ffplay:
-        return None
-
-    command = [
-        ffplay,
-        "-hide_banner",
-        "-nostats",
-        "-loglevel",
-        "error",
-        "-alwaysontop",
-        "-f",
-        "lavfi",
-        "-i",
-        f"color=c=black:s={CRT_OUTPUT_SIZE}:r=60",
-        "-fs",
-        "-noborder",
-    ]
-    try:
-        proc = subprocess.Popen(command)
-        time.sleep(0.1)
-        if proc.poll() is not None:
-            return None
-        return proc
-    except Exception:
-        return None
-
-
-def stop_cover_overlay(proc):
-    stop_preview_process(proc)
-
-
-def restart_preview_after_mode_change(video_device, profile):
-    global _cover_proc
-
-    # Deterministic transition: always hide compositor with a black cover,
-    # then restart preview. This avoids desktop peeking on single-open UVC cards.
-    _cover_proc = start_cover_overlay()
-    stop_preview()
-    try:
-        if not _shutdown:
-            start_preview(video_device, profile)
-            time.sleep(0.12)
-    finally:
-        stop_cover_overlay(_cover_proc)
-        _cover_proc = None
-
-
 def cycle_vintage_mode(direction):
     current_mode = get_vintage_mode()
     if current_mode not in VINTAGE_MODE_SEQUENCE:
-        current_index = VINTAGE_MODE_SEQUENCE.index("crt")
+        current_index = VINTAGE_MODE_SEQUENCE.index("retro")
     else:
         current_index = VINTAGE_MODE_SEQUENCE.index(current_mode)
 
@@ -211,11 +112,12 @@ def cycle_vintage_mode(direction):
             "framerate": _current_framerate,
         }
         set_vintage_mode(next_mode)
-        queue_filter_toast(vintage_mode_label(next_mode), FILTER_TOAST_SEC)
-        print(f"Vintage mode changed: {current_mode} -> {next_mode}")
+        print(f"Filter mode changed: {current_mode} -> {next_mode}")
 
         if was_running and video_device and profile["size"] and profile["framerate"]:
-            restart_preview_after_mode_change(video_device, profile)
+            stop_preview()
+            if not _shutdown:
+                start_preview(video_device, profile)
 
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
@@ -584,7 +486,8 @@ def overlay_layout(position):
 
 
 def build_overlay_filter():
-    toast_text, toast_sec = peek_filter_toast()
+    if get_vintage_mode() == "base":
+        return None
 
     overlay_text = OVERLAY_TEXT
     if OVERLAY_ENABLED and not overlay_text and OVERLAY_TEXT_FILE and os.path.exists(OVERLAY_TEXT_FILE):
@@ -620,23 +523,6 @@ def build_overlay_filter():
                     chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#61e3ff@0.22", "#3fd7ff@0.16", 4, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
                 chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
 
-    if toast_text and toast_sec > 0:
-        # Keep this simple and explicit for maximum ffmpeg filter compatibility.
-        chain.append(f"drawbox=x=(w*0.22):y=(h*0.42):w=(w*0.56):h=56:color=black@0.72:t=fill:enable='lt(t,{toast_sec:.3f})'")
-        chain.append(
-            drawtext_filter(
-                toast_text,
-                "(w-text_w)/2",
-                "(h*0.42)+14",
-                max(24, int(OVERLAY_FONT_SIZE * 0.95)),
-                "white",
-                "black@1.0",
-                3,
-                OVERLAY_FONT_NAME,
-                OVERLAY_FONT_FILE,
-            ) + f":enable='lt(t,{toast_sec:.3f})'"
-        )
-
     if not chain:
         return None
     return ",".join(chain)
@@ -645,67 +531,24 @@ def build_overlay_filter():
 def build_vintage_filter():
     vintage_mode = get_vintage_mode()
 
-    if vintage_mode in {"off", "none", "0", "false"}:
+    if vintage_mode == "base":
         return None
 
-    if vintage_mode == "film":
-        # Softer contrast curve, warm bias, and fine grain for a filmic look.
+    if vintage_mode == "retro":
+        # Vibrant retro look with strong scanlines.
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.08:brightness=-0.01:saturation=0.96:gamma=0.99,"
-            "colorbalance=rs=0.05:gs=0.02:bs=-0.03,"
-            "noise=alls=8:allf=t+u,"
-            "gblur=sigma=0.35,"
-            "vignette=PI/9"
+            "eq=contrast=1.24:brightness=-0.02:saturation=1.30:gamma=1.06,"
+            "hue=h=4:s=1.18,"
+            "noise=alls=6:allf=t+u,"
+            "drawgrid=width=iw:height=2:thickness=1:color=black@0.44,"
+            "drawgrid=width=iw:height=2:thickness=1:color=black@0.26:y=1"
         )
 
-    if vintage_mode == "camcorder":
-        return (
-            "format=yuv420p,"
-            "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.20:brightness=-0.02:saturation=0.88:gamma=1.05,"
-            "hue=h=5:s=1.08,"
-            "noise=alls=12:allf=t+u,"
-            "gblur=sigma=0.65,"
-            "vignette=PI/6,"
-            "drawgrid=width=iw:height=3:thickness=1:color=black@0.16"
-        )
-
-    if vintage_mode == "light":
-        return (
-            "format=yuv420p,"
-            "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.07:brightness=0.00:saturation=1.06:gamma=1.01,"
-            "hue=h=2:s=1.04"
-        )
-
-    if vintage_mode == "crt":
-        # Aggressive scanline pass with stronger line density and contrast.
-        return (
-            "format=yuv420p,"
-            "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.18:brightness=-0.03:saturation=1.06:gamma=1.04,"
-            "hue=h=2:s=1.08,"
-            "noise=alls=7:allf=t+u,"
-            "drawgrid=width=iw:height=2:thickness=1:color=black@0.38,"
-            "drawgrid=width=iw:height=2:thickness=1:color=black@0.20:y=1"
-        )
-
-    # Unknown mode fallback keeps a moderate analog character.
-    return (
-        "format=yuv420p,"
-        "setsar=1,setdar=4/3,"
-        f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-        "eq=contrast=1.12:brightness=-0.01:saturation=1.02:gamma=1.02,"
-        "hue=h=3:s=1.10,"
-        "noise=alls=5:allf=t+u,"
-        "drawgrid=width=iw:height=3:thickness=1:color=black@0.18"
-    )
+    # Any unknown value falls back to base camera output.
+    return None
 
 
 def build_video_filter_chain():
@@ -895,7 +738,6 @@ def start_preview(video_device, profile):
             "-nostats",
             "-loglevel",
             "error",
-            "-alwaysontop",
             "-fflags",
             "nobuffer",
             "-flags",
@@ -923,7 +765,7 @@ def start_preview(video_device, profile):
             "-noborder",
         ])
         print("Preview mode: compositor fullscreen (ffplay)")
-        print(f"Vintage mode: {get_vintage_mode()}, overlay: {'on' if OVERLAY_ENABLED else 'off'}")
+        print(f"Filter mode: {get_vintage_mode()}, overlay: {'off' if get_vintage_mode() == 'base' else ('on' if OVERLAY_ENABLED else 'off')}")
         if OVERLAY_TEXT:
             print(f"Overlay text (env): {OVERLAY_TEXT}")
         elif OVERLAY_TEXT_FILE:
@@ -959,7 +801,6 @@ def start_preview(video_device, profile):
     _current_size = video_size
     _current_framerate = framerate
     _last_start_ts = time.time()
-    clear_filter_toast()
 
 
 def stop_preview():
