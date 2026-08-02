@@ -10,7 +10,7 @@ User=bran
 Group=bran
 WorkingDirectory=/home/bran/photobooth
 Environment=PYTHONUNBUFFERED=1
-Environment=VINTAGE_MODE=crt_arcade
+Environment=VINTAGE_MODE=vhs
 Environment=CRT_OUTPUT_SIZE=640x480
 Environment=HIDE_MOUSE_CURSOR=1
 Environment=OVERLAY_TEXT_FILE=/home/bran/photobooth/overlay_text.txt

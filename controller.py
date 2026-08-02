@@ -43,8 +43,8 @@ def env_float(name, default):
 PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 
 # Filter controls
-VINTAGE_MODE = os.getenv("VINTAGE_MODE", "crt_arcade").strip().lower()  # base | vhs | crt_arcade | cyber_glitch | pixel_lofi
-VINTAGE_MODE_SEQUENCE = ["base", "vhs", "crt_arcade", "cyber_glitch", "pixel_lofi"]
+VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi
+VINTAGE_MODE_SEQUENCE = ["base", "vhs", "cyber_glitch", "pixel_lofi"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -83,8 +83,8 @@ VINTAGE_SCALE_FLAGS = os.getenv("VINTAGE_SCALE_FLAGS", "neighbor").strip() or "n
 def normalize_filter_mode(mode):
     mode = (mode or "").strip().lower()
     aliases = {
-        "retro": "crt_arcade",
-        "crt": "crt_arcade",
+        "retro": "vhs",
+        "crt": "vhs",
         "cyber": "cyber_glitch",
         "glitch": "cyber_glitch",
         "pixel": "pixel_lofi",
@@ -110,7 +110,7 @@ def set_vintage_mode(mode):
 def cycle_vintage_mode(direction):
     current_mode = get_vintage_mode()
     if current_mode not in VINTAGE_MODE_SEQUENCE:
-        current_index = VINTAGE_MODE_SEQUENCE.index("crt_arcade")
+        current_index = VINTAGE_MODE_SEQUENCE.index("vhs")
     else:
         current_index = VINTAGE_MODE_SEQUENCE.index(current_mode)
 
@@ -551,53 +551,42 @@ def build_vintage_filter():
         return None
 
     if vintage_mode == "vhs":
-        # VHS look: softer detail, color skew, grain, and gentle tracking lines.
+        # VHS look: heavier tape wobble vibe, stronger grain and scanline texture.
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.12:brightness=-0.03:saturation=0.88:gamma=0.98,"
-            "hue=h=-5:s=0.92,"
-            "noise=alls=10:allf=t+u,"
-            "gblur=sigma=0.45,"
-            "drawgrid=width=iw:height=6:thickness=1:color=black@0.16"
-        )
-
-    if vintage_mode == "crt_arcade":
-        # Vibrant arcade CRT look with pronounced scanlines.
-        return (
-            "format=yuv420p,"
-            "setsar=1,setdar=4/3,"
-            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.26:brightness=-0.02:saturation=1.34:gamma=1.07,"
-            "hue=h=3:s=1.20,"
-            "noise=alls=5:allf=t+u,"
-            "drawgrid=width=iw:height=2:thickness=1:color=black@0.48,"
-            "drawgrid=width=iw:height=2:thickness=1:color=black@0.28:y=1"
+            "eq=contrast=1.24:brightness=-0.06:saturation=0.72:gamma=0.94,"
+            "hue=h=-10:s=0.82,"
+            "noise=alls=18:allf=t+u,"
+            "gblur=sigma=0.75,"
+            "drawgrid=width=iw:height=4:thickness=1:color=black@0.24,"
+            "drawgrid=width=iw:height=4:thickness=1:color=black@0.12:y=2"
         )
 
     if vintage_mode == "cyber_glitch":
-        # High-contrast cyan/magenta cyber look with gritty lines.
+        # Strong cyber/glitch look with hard contrast and aggressive color shift.
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.32:brightness=-0.01:saturation=1.45:gamma=1.08,"
-            "hue=h=38:s=1.36,"
-            "noise=alls=7:allf=t+u,"
-            "unsharp=5:5:1.2:5:5:0.0,"
-            "drawgrid=width=iw:height=3:thickness=1:color=black@0.24"
+            "eq=contrast=1.50:brightness=-0.03:saturation=1.85:gamma=1.14,"
+            "hue=h=64:s=1.70,"
+            "noise=alls=12:allf=t+u,"
+            "unsharp=7:7:1.8:7:7:0.0,"
+            "drawgrid=width=iw:height=2:thickness=1:color=black@0.30"
         )
 
     if vintage_mode == "pixel_lofi":
-        # Pixelated low-fi look.
+        # Strong low-fi pixelation with chunky nearest-neighbor scaling.
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
-            "scale=320:240:flags=neighbor,"
+            "scale=240:180:flags=neighbor,"
             f"scale={CRT_OUTPUT_SIZE}:flags=neighbor,"
-            "eq=contrast=1.14:brightness=-0.01:saturation=1.18:gamma=1.03,"
-            "noise=alls=4:allf=t"
+            "eq=contrast=1.28:brightness=-0.04:saturation=1.42:gamma=1.08,"
+            "noise=alls=9:allf=t+u,"
+            "drawgrid=width=3:height=3:thickness=1:color=black@0.14"
         )
 
     # Any unknown value falls back to base camera output.
