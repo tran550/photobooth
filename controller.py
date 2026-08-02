@@ -583,12 +583,14 @@ def build_vintage_filter():
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.42:brightness=-0.02:saturation=1.52:gamma=1.10,"
-            "hue=h=20:s=1.28,"
-            "colorbalance=rs=0.12:gs=-0.22:bs=0.08,"
-            "noise=alls=12:allf=t+u,"
-            "unsharp=7:7:1.8:7:7:0.0,"
-            "drawgrid=width=iw:height=2:thickness=1:color=black@0.30"
+            "rgbashift=rh=6:rv=2:gh=-4:gv=-2:bh=-9:bv=4,"
+            "eq=contrast=1.48:brightness=-0.02:saturation=1.62:gamma=1.11,"
+            "hue=h=18:s=1.34,"
+            "colorbalance=rs=0.14:gs=-0.20:bs=0.10,"
+            "noise=alls=10:allf=t+u,"
+            "unsharp=7:7:2.1:7:7:0.0,"
+            "drawgrid=width=iw:height=3:thickness=1:color=black@0.26,"
+            "drawgrid=width=iw:height=3:thickness=1:color=#00ffff@0.10:y=1"
         )
 
     if vintage_mode == "pixel_lofi":
