@@ -43,8 +43,8 @@ def env_float(name, default):
 PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 
 # Filter controls
-VINTAGE_MODE = os.getenv("VINTAGE_MODE", "retro").strip().lower()  # base | retro
-VINTAGE_MODE_SEQUENCE = ["base", "retro"]
+VINTAGE_MODE = os.getenv("VINTAGE_MODE", "crt_arcade").strip().lower()  # base | vhs | crt_arcade | cyber_glitch | pixel_lofi
+VINTAGE_MODE_SEQUENCE = ["base", "vhs", "crt_arcade", "cyber_glitch", "pixel_lofi"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -80,21 +80,37 @@ PRINT_DEVICE_FILE = os.getenv("PRINT_DEVICE_FILE", "").strip()  # ex: /dev/usb/l
 VINTAGE_SCALE_FLAGS = os.getenv("VINTAGE_SCALE_FLAGS", "neighbor").strip() or "neighbor"
 
 
+def normalize_filter_mode(mode):
+    mode = (mode or "").strip().lower()
+    aliases = {
+        "retro": "crt_arcade",
+        "crt": "crt_arcade",
+        "cyber": "cyber_glitch",
+        "glitch": "cyber_glitch",
+        "pixel": "pixel_lofi",
+        "lofi": "pixel_lofi",
+    }
+    mode = aliases.get(mode, mode)
+    if mode in VINTAGE_MODE_SEQUENCE:
+        return mode
+    return "base"
+
+
 def get_vintage_mode():
     with _vintage_mode_lock:
-        return VINTAGE_MODE
+        return normalize_filter_mode(VINTAGE_MODE)
 
 
 def set_vintage_mode(mode):
     global VINTAGE_MODE
     with _vintage_mode_lock:
-        VINTAGE_MODE = mode
+        VINTAGE_MODE = normalize_filter_mode(mode)
 
 
 def cycle_vintage_mode(direction):
     current_mode = get_vintage_mode()
     if current_mode not in VINTAGE_MODE_SEQUENCE:
-        current_index = VINTAGE_MODE_SEQUENCE.index("retro")
+        current_index = VINTAGE_MODE_SEQUENCE.index("crt_arcade")
     else:
         current_index = VINTAGE_MODE_SEQUENCE.index(current_mode)
 
@@ -534,17 +550,54 @@ def build_vintage_filter():
     if vintage_mode == "base":
         return None
 
-    if vintage_mode == "retro":
-        # Vibrant retro look with strong scanlines.
+    if vintage_mode == "vhs":
+        # VHS look: softer detail, color skew, grain, and gentle tracking lines.
         return (
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.24:brightness=-0.02:saturation=1.30:gamma=1.06,"
-            "hue=h=4:s=1.18,"
-            "noise=alls=6:allf=t+u,"
-            "drawgrid=width=iw:height=2:thickness=1:color=black@0.44,"
-            "drawgrid=width=iw:height=2:thickness=1:color=black@0.26:y=1"
+            "eq=contrast=1.12:brightness=-0.03:saturation=0.88:gamma=0.98,"
+            "hue=h=-5:s=0.92,"
+            "noise=alls=10:allf=t+u,"
+            "gblur=sigma=0.45,"
+            "drawgrid=width=iw:height=6:thickness=1:color=black@0.16"
+        )
+
+    if vintage_mode == "crt_arcade":
+        # Vibrant arcade CRT look with pronounced scanlines.
+        return (
+            "format=yuv420p,"
+            "setsar=1,setdar=4/3,"
+            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
+            "eq=contrast=1.26:brightness=-0.02:saturation=1.34:gamma=1.07,"
+            "hue=h=3:s=1.20,"
+            "noise=alls=5:allf=t+u,"
+            "drawgrid=width=iw:height=2:thickness=1:color=black@0.48,"
+            "drawgrid=width=iw:height=2:thickness=1:color=black@0.28:y=1"
+        )
+
+    if vintage_mode == "cyber_glitch":
+        # High-contrast cyan/magenta cyber look with gritty lines.
+        return (
+            "format=yuv420p,"
+            "setsar=1,setdar=4/3,"
+            f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
+            "eq=contrast=1.32:brightness=-0.01:saturation=1.45:gamma=1.08,"
+            "hue=h=38:s=1.36,"
+            "noise=alls=7:allf=t+u,"
+            "unsharp=5:5:1.2:5:5:0.0,"
+            "drawgrid=width=iw:height=3:thickness=1:color=black@0.24"
+        )
+
+    if vintage_mode == "pixel_lofi":
+        # Pixelated low-fi look.
+        return (
+            "format=yuv420p,"
+            "setsar=1,setdar=4/3,"
+            "scale=320:240:flags=neighbor,"
+            f"scale={CRT_OUTPUT_SIZE}:flags=neighbor,"
+            "eq=contrast=1.14:brightness=-0.01:saturation=1.18:gamma=1.03,"
+            "noise=alls=4:allf=t"
         )
 
     # Any unknown value falls back to base camera output.
