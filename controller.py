@@ -152,6 +152,7 @@ def start_cover_overlay():
         "-nostats",
         "-loglevel",
         "error",
+        "-alwaysontop",
         "-f",
         "lavfi",
         "-i",
@@ -630,22 +631,20 @@ def build_overlay_filter():
                 chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
 
     if toast_text and toast_sec > 0:
-        toast_text = escape_drawtext_text(toast_text)
-        chain.extend([
-            f"drawbox=x=(w*0.22):y=26:w=(w*0.56):h=52:color=black@0.55:t=fill:enable='lt(t,{toast_sec:.3f})'",
-            "drawbox=x=(w*0.22):y=26:w=(w*0.56):h=52:color=white@0.20:t=2:enable='lt(t,{:.3f})'".format(toast_sec),
+        # Keep this simple and explicit for maximum ffmpeg filter compatibility.
+        chain.append(
             drawtext_filter(
                 toast_text,
                 "(w-text_w)/2",
-                "42",
-                max(18, int(OVERLAY_FONT_SIZE * 0.8)),
+                "36",
+                max(22, int(OVERLAY_FONT_SIZE * 0.9)),
                 "white",
-                "black@0.9",
-                2,
+                "black@1.0",
+                3,
                 OVERLAY_FONT_NAME,
                 OVERLAY_FONT_FILE,
-            ) + f":enable='lt(t,{toast_sec:.3f})'",
-        ])
+            ) + f":enable='lt(t,{toast_sec:.3f})'"
+        )
 
     if not chain:
         return None
@@ -905,6 +904,7 @@ def start_preview(video_device, profile):
             "-nostats",
             "-loglevel",
             "error",
+            "-alwaysontop",
             "-fflags",
             "nobuffer",
             "-flags",

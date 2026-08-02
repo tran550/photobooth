@@ -2,6 +2,7 @@
 Description=Photobooth Live Preview (Root Boot)
 After=graphical.target network-online.target systemd-user-sessions.service
 Wants=graphical.target network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -43,7 +44,6 @@ ExecStartPre=/usr/bin/bash -lc 'for i in {1..20}; do WAYLAND_DISPLAY=wayland-0 X
 ExecStart=/usr/bin/python3 -u /home/bran/photobooth/controller.py
 Restart=on-failure
 RestartSec=2
-StartLimitIntervalSec=0
 TimeoutStopSec=5
 StandardOutput=journal
 StandardError=journal
