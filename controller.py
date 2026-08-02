@@ -25,6 +25,7 @@ _capture_state_lock = threading.Lock()
 _preview_lock = threading.Lock()
 _keyboard_listener_threads = []
 _vintage_mode_lock = threading.Lock()
+_last_filter_switch_ts = 0.0
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -41,6 +42,7 @@ def env_float(name, default):
 
 
 PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
+FILTER_SWITCH_COOLDOWN_SEC = max(0.0, env_float("FILTER_SWITCH_COOLDOWN_SEC", 0.22))
 
 # Filter controls
 VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi
@@ -108,6 +110,13 @@ def set_vintage_mode(mode):
 
 
 def cycle_vintage_mode(direction):
+    global _last_filter_switch_ts
+
+    now = time.time()
+    if (now - _last_filter_switch_ts) < FILTER_SWITCH_COOLDOWN_SEC:
+        return
+    _last_filter_switch_ts = now
+
     current_mode = get_vintage_mode()
     if current_mode not in VINTAGE_MODE_SEQUENCE:
         current_index = VINTAGE_MODE_SEQUENCE.index("vhs")
@@ -132,6 +141,9 @@ def cycle_vintage_mode(direction):
 
         if was_running and video_device and profile["size"] and profile["framerate"]:
             stop_preview()
+            # Ensure old ffplay/cvlc handles are gone before reopening the source.
+            kill_stale_preview_processes()
+            time.sleep(0.08)
             if not _shutdown:
                 start_preview(video_device, profile)
 
@@ -556,10 +568,10 @@ def build_vintage_filter():
             "format=yuv420p,"
             "setsar=1,setdar=4/3,"
             f"scale={CRT_OUTPUT_SIZE}:flags={VINTAGE_SCALE_FLAGS},"
-            "eq=contrast=1.24:brightness=-0.06:saturation=0.72:gamma=0.94,"
-            "hue=h=-10:s=0.82,"
-            "noise=alls=18:allf=t+u,"
-            "gblur=sigma=0.75,"
+            "eq=contrast=1.18:brightness=-0.01:saturation=1.04:gamma=1.00,"
+            "hue=h=-6:s=1.02,"
+            "noise=alls=14:allf=t+u,"
+            "gblur=sigma=0.58,"
             "drawgrid=width=iw:height=4:thickness=1:color=black@0.24,"
             "drawgrid=width=iw:height=4:thickness=1:color=black@0.12:y=2"
         )
@@ -858,6 +870,7 @@ def stop_preview():
     except Exception:
         try:
             _preview_proc.kill()
+            _preview_proc.wait(timeout=1)
         except Exception:
             pass
 
