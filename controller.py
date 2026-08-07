@@ -13,6 +13,7 @@ import traceback
 _shutdown = False
 _preview_proc = None
 _cursor_hider_proc = None
+_transition_cover_proc = None
 _current_device = None
 _current_format = None
 _current_size = None
@@ -44,6 +45,7 @@ def env_float(name, default):
 
 PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 FILTER_SWITCH_COOLDOWN_SEC = max(0.0, env_float("FILTER_SWITCH_COOLDOWN_SEC", 0.22))
+TRANSITION_COVER_ENABLED = os.getenv("TRANSITION_COVER_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 # Filter controls
 VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi
@@ -145,12 +147,16 @@ def cycle_vintage_mode(direction):
         print(f"Filter mode changed: {current_mode} -> {next_mode}")
 
         if was_running and video_device and profile["size"] and profile["framerate"]:
-            stop_preview()
-            # Ensure old ffplay/cvlc handles are gone before reopening the source.
-            kill_stale_preview_processes()
-            time.sleep(0.08)
-            if not _shutdown:
-                start_preview(video_device, profile)
+            cover_proc = start_transition_cover()
+            try:
+                stop_preview()
+                # Ensure old ffplay/cvlc handles are gone before reopening the source.
+                kill_stale_preview_processes()
+                time.sleep(0.08)
+                if not _shutdown:
+                    start_preview(video_device, profile)
+            finally:
+                stop_transition_cover(cover_proc)
 
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
@@ -245,6 +251,69 @@ def capture_frame_bytes_with_retries(video_device, profile, filter_chain=None, a
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("frame capture failed after retries")
+
+
+def should_retry_capture_with_paused_preview(exc):
+    message = str(exc).lower()
+    return (
+        "device or resource busy" in message
+        or "no jpeg data found" in message
+        or "invalid data" in message
+        or "resource busy" in message
+    )
+
+
+def start_transition_cover():
+    global _transition_cover_proc
+
+    if not TRANSITION_COVER_ENABLED or not compositor_active():
+        return None
+
+    ffplay = shutil.which("ffplay")
+    if not ffplay:
+        return None
+
+    command = [
+        ffplay,
+        "-hide_banner",
+        "-nostats",
+        "-loglevel",
+        "error",
+        "-alwaysontop",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={CRT_OUTPUT_SIZE}:r=30",
+        "-fs",
+        "-noborder",
+    ]
+    try:
+        proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.06)
+        if proc.poll() is not None:
+            return None
+        _transition_cover_proc = proc
+        return proc
+    except Exception:
+        return None
+
+
+def stop_transition_cover(proc):
+    global _transition_cover_proc
+
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=1.2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    if _transition_cover_proc is proc:
+        _transition_cover_proc = None
 
 
 def save_capture_bytes(image_bytes):
@@ -373,16 +442,41 @@ def trigger_capture(source="space"):
                     return
 
                 print("Capturing frame...")
-                if CAPTURE_PAUSE_PREVIEW and was_running:
-                    stop_preview()
-                    # Ensure ffplay/cvlc fully releases /dev/video* before one-shot capture.
-                    kill_stale_preview_processes()
-                    time.sleep(0.2)
+                captured_bytes = None
 
-                captured_bytes = capture_frame_bytes_with_retries(video_device, profile, filter_chain=capture_filter_chain)
+                # First try to capture without interrupting preview to avoid desktop flash.
+                if was_running and CAPTURE_PAUSE_PREVIEW:
+                    try:
+                        captured_bytes = capture_frame_bytes_with_retries(
+                            video_device,
+                            profile,
+                            filter_chain=capture_filter_chain,
+                            attempts=2,
+                        )
+                    except Exception as exc:
+                        if not should_retry_capture_with_paused_preview(exc):
+                            raise
 
-                if CAPTURE_PAUSE_PREVIEW and was_running and not _shutdown:
-                    start_preview(video_device, profile)
+                if captured_bytes is None:
+                    cover_proc = start_transition_cover() if (CAPTURE_PAUSE_PREVIEW and was_running) else None
+                    try:
+                        if CAPTURE_PAUSE_PREVIEW and was_running:
+                            stop_preview()
+                            # Ensure ffplay/cvlc fully releases /dev/video* before one-shot capture.
+                            kill_stale_preview_processes()
+                            time.sleep(0.2)
+
+                        captured_bytes = capture_frame_bytes_with_retries(
+                            video_device,
+                            profile,
+                            filter_chain=capture_filter_chain,
+                            attempts=4,
+                        )
+
+                        if CAPTURE_PAUSE_PREVIEW and was_running and not _shutdown:
+                            start_preview(video_device, profile)
+                    finally:
+                        stop_transition_cover(cover_proc)
 
             saved_path = save_capture_bytes(captured_bytes)
             if saved_path:
