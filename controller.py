@@ -56,6 +56,7 @@ CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
 KEYBOARD_GRAB_EXCLUSIVE = os.getenv("KEYBOARD_GRAB_EXCLUSIVE", "1").strip().lower() not in {"0", "false", "off", "no"}
+KEYBOARD_GRAB_ALL_DEVICES = os.getenv("KEYBOARD_GRAB_ALL_DEVICES", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 # Overlay controls
 OVERLAY_ENABLED = os.getenv("OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -618,6 +619,7 @@ def start_evdev_space_listener():
     def _listen():
         dev = None
         grabbed = False
+        grabbed_extra_devices = []
         try:
             dev = InputDevice(device_path)
             if KEYBOARD_GRAB_EXCLUSIVE:
@@ -627,6 +629,34 @@ def start_evdev_space_listener():
                     print(f"Capture/filter listener: grabbed {device_path} exclusively")
                 except Exception as exc:
                     print(f"Capture/filter listener: failed to grab {device_path} exclusively ({exc}); keys may leak to desktop")
+
+                if KEYBOARD_GRAB_ALL_DEVICES:
+                    target_codes = {
+                        ecodes.KEY_SPACE,
+                        ecodes.KEY_UP,
+                        ecodes.KEY_DOWN,
+                        ecodes.KEY_KP8,
+                        ecodes.KEY_KP2,
+                        ecodes.KEY_ESC,
+                    }
+                    for extra_path in sorted(glob.glob("/dev/input/event*")):
+                        if extra_path == device_path:
+                            continue
+                        try:
+                            extra_dev = InputDevice(extra_path)
+                            key_caps = set(extra_dev.capabilities().get(ecodes.EV_KEY, []))
+                            if not (key_caps & target_codes):
+                                extra_dev.close()
+                                continue
+                            extra_dev.grab()
+                            grabbed_extra_devices.append(extra_dev)
+                            print(f"Capture/filter listener: additionally grabbed {extra_path}")
+                        except Exception:
+                            # Best-effort only; do not fail the listener.
+                            try:
+                                extra_dev.close()
+                            except Exception:
+                                pass
             print(f"Capture/filter listener: evdev mode on {device_path} (space + up/down arrows)")
             for event in dev.read_loop():
                 if _shutdown:
@@ -642,6 +672,15 @@ def start_evdev_space_listener():
         except Exception as exc:
             print(f"Space capture listener: evdev error: {exc}")
         finally:
+            for extra_dev in grabbed_extra_devices:
+                try:
+                    extra_dev.ungrab()
+                except Exception:
+                    pass
+                try:
+                    extra_dev.close()
+                except Exception:
+                    pass
             if dev is not None and grabbed:
                 try:
                     dev.ungrab()
