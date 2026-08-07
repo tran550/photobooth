@@ -45,7 +45,7 @@ def env_float(name, default):
 
 PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 FILTER_SWITCH_COOLDOWN_SEC = max(0.0, env_float("FILTER_SWITCH_COOLDOWN_SEC", 0.22))
-TRANSITION_COVER_ENABLED = os.getenv("TRANSITION_COVER_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+TRANSITION_COVER_ENABLED = os.getenv("TRANSITION_COVER_ENABLED", "0").strip().lower() not in {"0", "false", "off", "no"}
 
 # Filter controls
 VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi
@@ -147,16 +147,11 @@ def cycle_vintage_mode(direction):
         print(f"Filter mode changed: {current_mode} -> {next_mode}")
 
         if was_running and video_device and profile["size"] and profile["framerate"]:
-            cover_proc = start_transition_cover()
             try:
-                stop_preview()
-                # Ensure old ffplay/cvlc handles are gone before reopening the source.
-                kill_stale_preview_processes()
-                time.sleep(0.08)
-                if not _shutdown:
-                    start_preview(video_device, profile)
-            finally:
-                stop_transition_cover(cover_proc)
+                restart_preview_after_switch(video_device, profile, next_mode, current_mode)
+            except Exception as exc:
+                print(f"Filter switch failed: {exc}")
+                raise
 
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
@@ -314,6 +309,47 @@ def stop_transition_cover(proc):
             pass
     if _transition_cover_proc is proc:
         _transition_cover_proc = None
+
+
+def restart_preview_after_switch(video_device, profile, target_mode, fallback_mode):
+    cover_proc = start_transition_cover()
+    try:
+        stop_preview()
+        kill_stale_preview_processes()
+
+        last_exc = None
+        for attempt in range(1, 5):
+            if _shutdown:
+                return
+            try:
+                time.sleep(0.06 * attempt)
+                start_preview(video_device, profile)
+                return
+            except Exception as exc:
+                last_exc = exc
+                print(f"Preview restart attempt {attempt} failed for mode {target_mode}: {exc}")
+                kill_stale_preview_processes()
+
+        # Roll back to previous mode if all attempts failed, so user is not left stuck.
+        set_vintage_mode(fallback_mode)
+        for attempt in range(1, 4):
+            if _shutdown:
+                return
+            try:
+                time.sleep(0.08 * attempt)
+                start_preview(video_device, profile)
+                print(f"Reverted to previous mode after failed switch: {fallback_mode}")
+                return
+            except Exception as exc:
+                last_exc = exc
+                print(f"Rollback restart attempt {attempt} failed: {exc}")
+                kill_stale_preview_processes()
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Preview restart failed after mode switch")
+    finally:
+        stop_transition_cover(cover_proc)
 
 
 def save_capture_bytes(image_bytes):
