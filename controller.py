@@ -55,6 +55,7 @@ VINTAGE_MODE_SEQUENCE = ["base", "vhs", "cyber_glitch", "pixel_lofi"]
 CRT_OUTPUT_SIZE = os.getenv("CRT_OUTPUT_SIZE", "1024x768").strip()
 FORCE_VIDEO_DEVICE = os.getenv("FORCE_VIDEO_DEVICE", "").strip()
 HIDE_MOUSE_CURSOR = os.getenv("HIDE_MOUSE_CURSOR", "1").strip().lower() not in {"0", "false", "off", "no"}
+KEYBOARD_GRAB_EXCLUSIVE = os.getenv("KEYBOARD_GRAB_EXCLUSIVE", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 # Overlay controls
 OVERLAY_ENABLED = os.getenv("OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -615,8 +616,17 @@ def start_evdev_space_listener():
         return
 
     def _listen():
+        dev = None
+        grabbed = False
         try:
             dev = InputDevice(device_path)
+            if KEYBOARD_GRAB_EXCLUSIVE:
+                try:
+                    dev.grab()
+                    grabbed = True
+                    print(f"Capture/filter listener: grabbed {device_path} exclusively")
+                except Exception as exc:
+                    print(f"Capture/filter listener: failed to grab {device_path} exclusively ({exc}); keys may leak to desktop")
             print(f"Capture/filter listener: evdev mode on {device_path} (space + up/down arrows)")
             for event in dev.read_loop():
                 if _shutdown:
@@ -631,6 +641,12 @@ def start_evdev_space_listener():
                     trigger_filter_cycle(-1)
         except Exception as exc:
             print(f"Space capture listener: evdev error: {exc}")
+        finally:
+            if dev is not None and grabbed:
+                try:
+                    dev.ungrab()
+                except Exception:
+                    pass
 
     t = threading.Thread(target=_listen, daemon=True)
     _keyboard_listener_threads.append(t)
@@ -1005,6 +1021,7 @@ def start_preview(video_device, profile):
             "-nostats",
             "-loglevel",
             "error",
+            "-nostdin",
             "-fflags",
             "nobuffer",
             "-flags",
