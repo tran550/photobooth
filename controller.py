@@ -46,6 +46,8 @@ def env_float(name, default):
 PERIODIC_RESTART_SEC = max(0.0, env_float("PERIODIC_RESTART_SEC", 0.0))
 FILTER_SWITCH_COOLDOWN_SEC = max(0.0, env_float("FILTER_SWITCH_COOLDOWN_SEC", 0.22))
 TRANSITION_COVER_ENABLED = os.getenv("TRANSITION_COVER_ENABLED", "0").strip().lower() not in {"0", "false", "off", "no"}
+FILTER_SWITCH_LIVE_APPLY = os.getenv("FILTER_SWITCH_LIVE_APPLY", "0").strip().lower() not in {"0", "false", "off", "no"}
+CAPTURE_FALLBACK_STOP_PREVIEW = os.getenv("CAPTURE_FALLBACK_STOP_PREVIEW", "0").strip().lower() not in {"0", "false", "off", "no"}
 
 # Filter controls
 VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi
@@ -145,6 +147,10 @@ def cycle_vintage_mode(direction):
         }
         set_vintage_mode(next_mode)
         print(f"Filter mode changed: {current_mode} -> {next_mode}")
+
+        if not FILTER_SWITCH_LIVE_APPLY:
+            print("Filter switch live apply disabled; new mode will apply on next preview restart.")
+            return
 
         if was_running and video_device and profile["size"] and profile["framerate"]:
             try:
@@ -481,22 +487,22 @@ def trigger_capture(source="space"):
                 captured_bytes = None
 
                 # First try to capture without interrupting preview to avoid desktop flash.
-                if was_running and CAPTURE_PAUSE_PREVIEW:
+                if was_running:
                     try:
                         captured_bytes = capture_frame_bytes_with_retries(
                             video_device,
                             profile,
                             filter_chain=capture_filter_chain,
-                            attempts=2,
+                            attempts=4,
                         )
                     except Exception as exc:
-                        if not should_retry_capture_with_paused_preview(exc):
+                        if not CAPTURE_FALLBACK_STOP_PREVIEW or not should_retry_capture_with_paused_preview(exc):
                             raise
 
                 if captured_bytes is None:
-                    cover_proc = start_transition_cover() if (CAPTURE_PAUSE_PREVIEW and was_running) else None
+                    cover_proc = start_transition_cover() if (CAPTURE_PAUSE_PREVIEW and was_running and CAPTURE_FALLBACK_STOP_PREVIEW) else None
                     try:
-                        if CAPTURE_PAUSE_PREVIEW and was_running:
+                        if CAPTURE_PAUSE_PREVIEW and was_running and CAPTURE_FALLBACK_STOP_PREVIEW:
                             stop_preview()
                             # Ensure ffplay/cvlc fully releases /dev/video* before one-shot capture.
                             kill_stale_preview_processes()
@@ -509,7 +515,7 @@ def trigger_capture(source="space"):
                             attempts=4,
                         )
 
-                        if CAPTURE_PAUSE_PREVIEW and was_running and not _shutdown:
+                        if CAPTURE_PAUSE_PREVIEW and was_running and CAPTURE_FALLBACK_STOP_PREVIEW and not _shutdown:
                             start_preview(video_device, profile)
                     finally:
                         stop_transition_cover(cover_proc)
