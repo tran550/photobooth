@@ -1021,7 +1021,6 @@ def start_preview(video_device, profile):
             "-nostats",
             "-loglevel",
             "error",
-            "-nostdin",
             "-fflags",
             "nobuffer",
             "-flags",
