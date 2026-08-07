@@ -1147,11 +1147,30 @@ def stop_preview():
 
 
 def start_with_retries(reason):
+    global _current_device, _current_format, _current_size, _current_framerate
+
     retry_interval = RETRY_INTERVAL_SEC
     restart_count = 0
 
     while not _shutdown:
-        video_device, profile = pick_source()
+        # Ensure stale ffplay/cvlc instances are not holding /dev/video* between retries.
+        kill_stale_preview_processes()
+        time.sleep(0.08)
+
+        video_device = None
+        profile = None
+
+        # Prefer last known-good source first to avoid expensive probing churn.
+        if _current_device and os.path.exists(_current_device) and _current_size and _current_framerate:
+            video_device = _current_device
+            profile = {
+                "format": _current_format,
+                "size": _current_size,
+                "framerate": _current_framerate,
+            }
+        else:
+            video_device, profile = pick_source()
+
         if not video_device:
             print(f"[{reason}] No /dev/video* camera device found, retrying in {retry_interval:.1f}s...")
             time.sleep(retry_interval)
@@ -1170,6 +1189,11 @@ def start_with_retries(reason):
             return True
         except Exception as exc:
             print(f"[{reason}] Failed to start preview: {exc}")
+            # If cached profile fails repeatedly, force a fresh probe on next loop.
+            _current_device = None
+            _current_format = None
+            _current_size = None
+            _current_framerate = None
             time.sleep(retry_interval)
             retry_interval = min(retry_interval * 1.5, MAX_RETRY_INTERVAL_SEC)
 
