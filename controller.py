@@ -1,3 +1,4 @@
+import fcntl
 import glob
 import os
 import shutil
@@ -28,6 +29,7 @@ _keyboard_listener_threads = []
 _vintage_mode_lock = threading.Lock()
 _last_filter_switch_ts = 0.0
 _capture_save_lock = threading.Lock()
+_instance_lock_file = None
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -91,6 +93,22 @@ PRINT_USB_VENDOR_ID = os.getenv("PRINT_USB_VENDOR_ID", "").strip()
 PRINT_USB_PRODUCT_ID = os.getenv("PRINT_USB_PRODUCT_ID", "").strip()
 PRINT_DEVICE_FILE = os.getenv("PRINT_DEVICE_FILE", "").strip()  # ex: /dev/usb/lp0
 VINTAGE_SCALE_FLAGS = os.getenv("VINTAGE_SCALE_FLAGS", "neighbor").strip() or "neighbor"
+INSTANCE_LOCK_PATH = os.getenv("INSTANCE_LOCK_PATH", "/tmp/photobooth-preview.lock").strip() or "/tmp/photobooth-preview.lock"
+
+
+def acquire_instance_lock():
+    global _instance_lock_file
+
+    try:
+        os.makedirs(os.path.dirname(INSTANCE_LOCK_PATH) or "/tmp", exist_ok=True)
+        lock_file = open(INSTANCE_LOCK_PATH, "w", encoding="utf-8")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        _instance_lock_file = lock_file
+        return True
+    except Exception:
+        return False
 
 
 def normalize_filter_mode(mode):
@@ -1245,6 +1263,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if not acquire_instance_lock():
+        print(f"Another controller instance is already running (lock: {INSTANCE_LOCK_PATH}). Exiting.")
+        sys.exit(0)
+
     exit_code = 0
     while not _shutdown:
         try:
