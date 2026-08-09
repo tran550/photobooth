@@ -36,6 +36,8 @@ _capture_confirm_lock = threading.Lock()
 _capture_confirm_started_at = 0.0
 _status_overlay_lock = threading.Lock()
 _status_overlay_token = 0
+_resolved_capture_save_dir = None
+_warned_capture_save_dir_fallback = False
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -90,7 +92,8 @@ CAPTURE_KEY_ENABLED = os.getenv("CAPTURE_KEY_ENABLED", "1").strip().lower() not 
 CAPTURE_COOLDOWN_SEC = max(0.0, env_float("CAPTURE_COOLDOWN_SEC", 1.2))
 CAPTURE_PAUSE_PREVIEW = os.getenv("CAPTURE_PAUSE_PREVIEW", "0").strip().lower() not in {"0", "false", "off", "no"}
 CAPTURE_SAVE_ENABLED = os.getenv("CAPTURE_SAVE_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
-CAPTURE_SAVE_DIR = os.getenv("CAPTURE_SAVE_DIR", "/home/bran/photobooth/captures").strip() or "/home/bran/photobooth/captures"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CAPTURE_SAVE_DIR = os.getenv("CAPTURE_SAVE_DIR", os.path.join(SCRIPT_DIR, "captures")).strip() or os.path.join(SCRIPT_DIR, "captures")
 CAPTURE_SAVE_FORMAT = os.getenv("CAPTURE_SAVE_FORMAT", "png").strip().lower() or "png"
 CAPTURE_SAVE_JPEG_QUALITY = max(10, min(100, int(env_float("CAPTURE_SAVE_JPEG_QUALITY", 92))))
 
@@ -553,8 +556,8 @@ def save_capture_bytes(image_bytes):
 
     try:
         with _capture_save_lock:
-            os.makedirs(CAPTURE_SAVE_DIR, exist_ok=True)
-            output_path = os.path.join(CAPTURE_SAVE_DIR, filename)
+            output_dir = resolve_capture_save_dir()
+            output_path = os.path.join(output_dir, filename)
 
             if ext == "png":
                 with open(output_path, "wb") as handle:
@@ -572,6 +575,42 @@ def save_capture_bytes(image_bytes):
             return output_path
     except Exception as exc:
         raise RuntimeError(f"capture save failed: {exc}") from exc
+
+
+def resolve_capture_save_dir():
+    global _resolved_capture_save_dir, _warned_capture_save_dir_fallback
+
+    if _resolved_capture_save_dir:
+        return _resolved_capture_save_dir
+
+    configured_dir = CAPTURE_SAVE_DIR
+    if not os.path.isabs(configured_dir):
+        configured_dir = os.path.abspath(os.path.join(SCRIPT_DIR, configured_dir))
+
+    candidates = [
+        configured_dir,
+        os.path.join(SCRIPT_DIR, "captures"),
+        "/tmp/photobooth-captures",
+    ]
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            if not os.access(candidate, os.W_OK):
+                raise PermissionError(f"not writable: {candidate}")
+            _resolved_capture_save_dir = candidate
+            if candidate != configured_dir and not _warned_capture_save_dir_fallback:
+                _warned_capture_save_dir_fallback = True
+                print(f"Capture save dir fallback: configured '{configured_dir}' unavailable; using '{candidate}'")
+            return _resolved_capture_save_dir
+        except Exception as exc:
+            print(f"Capture save dir unavailable '{candidate}': {exc}")
+
+    raise RuntimeError("no writable capture save directory found")
 
 
 def print_image_bytes(image_bytes):
@@ -703,9 +742,15 @@ def trigger_capture_now(source="space"):
                     finally:
                         stop_transition_cover(cover_proc)
 
-            saved_path = save_capture_bytes(captured_bytes)
-            if saved_path:
-                print(f"Saved capture: {saved_path}")
+            saved_path = None
+            try:
+                saved_path = save_capture_bytes(captured_bytes)
+                if saved_path:
+                    print(f"Saved capture: {saved_path}")
+                    show_status_message(f"Saved: {os.path.basename(saved_path)}", 1.4)
+            except Exception as save_exc:
+                print(f"Capture save failed: {save_exc}")
+                show_status_message("Save failed (check save path)", 1.8)
             print_image_bytes(captured_bytes)
         except Exception as exc:
             # Attempt to recover preview if capture failed after stopping it.
@@ -1420,6 +1465,12 @@ def start_with_retries(reason):
 def main():
     kill_stale_preview_processes()
     _write_status_overlay("")
+    if CAPTURE_SAVE_ENABLED:
+        try:
+            resolved_dir = resolve_capture_save_dir()
+            print(f"Capture save enabled: {resolved_dir}")
+        except Exception as exc:
+            print(f"Capture save path warning: {exc}")
 
     # Keep trying until a camera source appears and preview starts.
     if not start_with_retries("startup"):
