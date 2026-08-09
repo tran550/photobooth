@@ -266,7 +266,32 @@ def _capture_confirm_is_pending():
 
 def request_capture_confirmation(source="space"):
     del source
-    trigger_capture_now("space")
+    if not CAPTURE_CONFIRM_ENABLED:
+        trigger_capture_now("confirm-disabled")
+        return
+
+    if _capture_in_progress:
+        return
+
+    if _capture_confirm_is_pending():
+        confirm_pending_capture("repeat-space")
+        return
+
+    _capture_confirm_mark_pending()
+    with _capture_confirm_lock:
+        started_at = _capture_confirm_started_at
+    print(f"Capture pending. Press Enter/Space to confirm or Esc to cancel (auto-confirm in {CAPTURE_CONFIRM_TIMEOUT_SEC:.1f}s).")
+
+    def _auto_confirm():
+        time.sleep(CAPTURE_CONFIRM_TIMEOUT_SEC)
+        with _capture_confirm_lock:
+            if not _capture_confirm_pending:
+                return
+            if _capture_confirm_started_at != started_at:
+                return
+        confirm_pending_capture("auto-confirm")
+
+    threading.Thread(target=_auto_confirm, daemon=True).start()
 
 
 def confirm_pending_capture(source="enter"):
@@ -781,7 +806,7 @@ def start_tty_space_listener():
                     continue
                 ch = sys.stdin.read(1)
                 if ch == " ":
-                    trigger_capture_now("space")
+                    request_capture_confirmation("space")
                 elif ch == "\x1b":
                     seq = ""
                     for _ in range(2):
@@ -794,8 +819,12 @@ def start_tty_space_listener():
                         trigger_filter_cycle(1)
                     elif seq == "[B":
                         trigger_filter_cycle(-1)
+                    else:
+                        cancel_pending_capture("esc")
                 elif ch in {"\n", "\r"}:
-                    if FILTER_SWITCH_MANUAL_APPLY_ENABLED:
+                    if _capture_confirm_is_pending():
+                        confirm_pending_capture("enter")
+                    elif FILTER_SWITCH_MANUAL_APPLY_ENABLED:
                         apply_selected_filter_mode()
             except Exception:
                 time.sleep(0.2)
@@ -864,6 +893,7 @@ def start_evdev_space_listener():
         return
 
     device_path = candidate_paths[0]
+    print(f"Capture/filter listener: using evdev device {device_path}")
 
     def _listen():
         dev = None
@@ -906,14 +936,18 @@ def start_evdev_space_listener():
                 if event.type != ecodes.EV_KEY or event.value != 1:
                     continue
                 if event.code == ecodes.KEY_SPACE:
-                    trigger_capture_now("space")
+                    request_capture_confirmation("space")
                 elif event.code in {ecodes.KEY_UP, ecodes.KEY_KP8}:
                     trigger_filter_cycle(1)
                 elif event.code in {ecodes.KEY_DOWN, ecodes.KEY_KP2}:
                     trigger_filter_cycle(-1)
                 elif event.code in {ecodes.KEY_ENTER, ecodes.KEY_KPENTER}:
-                    if FILTER_SWITCH_MANUAL_APPLY_ENABLED:
+                    if _capture_confirm_is_pending():
+                        confirm_pending_capture("enter")
+                    elif FILTER_SWITCH_MANUAL_APPLY_ENABLED:
                         apply_selected_filter_mode()
+                elif event.code == ecodes.KEY_ESC:
+                    cancel_pending_capture("esc")
         except Exception as exc:
             print(f"Space capture listener: evdev error: {exc}")
         finally:
@@ -929,6 +963,11 @@ def start_evdev_space_listener():
             if dev is not None and grabbed:
                 try:
                     dev.ungrab()
+                except Exception:
+                    pass
+            if dev is not None:
+                try:
+                    dev.close()
                 except Exception:
                     pass
 
