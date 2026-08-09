@@ -266,32 +266,7 @@ def _capture_confirm_is_pending():
 
 def request_capture_confirmation(source="space"):
     del source
-    if not CAPTURE_CONFIRM_ENABLED:
-        trigger_capture_now("confirm-disabled")
-        return
-
-    if _capture_in_progress:
-        return
-
-    if _capture_confirm_is_pending():
-        confirm_pending_capture("repeat-space")
-        return
-
-    _capture_confirm_mark_pending()
-    with _capture_confirm_lock:
-        started_at = _capture_confirm_started_at
-    print(f"Capture pending. Press Enter/Space to confirm or Esc to cancel (auto-confirm in {CAPTURE_CONFIRM_TIMEOUT_SEC:.1f}s).")
-
-    def _auto_confirm():
-        time.sleep(CAPTURE_CONFIRM_TIMEOUT_SEC)
-        with _capture_confirm_lock:
-            if not _capture_confirm_pending:
-                return
-            if _capture_confirm_started_at != started_at:
-                return
-        confirm_pending_capture("auto-confirm")
-
-    threading.Thread(target=_auto_confirm, daemon=True).start()
+    trigger_capture_now("space")
 
 
 def confirm_pending_capture(source="enter"):
@@ -720,15 +695,12 @@ def trigger_capture_now(source="space"):
                         )
                     except Exception as exc:
                         first_capture_exc = exc
-                        if not should_retry_capture_with_paused_preview(exc):
+                        if not CAPTURE_FALLBACK_STOP_PREVIEW or not should_retry_capture_with_paused_preview(exc):
                             raise
                         print(f"Live capture retry needed ({exc}); attempting paused-preview fallback.")
 
                 if captured_bytes is None:
-                    should_pause_preview = was_running and (
-                        CAPTURE_FALLBACK_STOP_PREVIEW
-                        or (first_capture_exc is not None and should_retry_capture_with_paused_preview(first_capture_exc))
-                    )
+                    should_pause_preview = was_running and CAPTURE_FALLBACK_STOP_PREVIEW and first_capture_exc is not None
                     cover_proc = start_transition_cover() if (CAPTURE_PAUSE_PREVIEW and should_pause_preview) else None
                     try:
                         if should_pause_preview:
@@ -809,7 +781,7 @@ def start_tty_space_listener():
                     continue
                 ch = sys.stdin.read(1)
                 if ch == " ":
-                    request_capture_confirmation("space")
+                    trigger_capture_now("space")
                 elif ch == "\x1b":
                     seq = ""
                     for _ in range(2):
@@ -822,12 +794,8 @@ def start_tty_space_listener():
                         trigger_filter_cycle(1)
                     elif seq == "[B":
                         trigger_filter_cycle(-1)
-                    else:
-                        cancel_pending_capture("esc")
                 elif ch in {"\n", "\r"}:
-                    if _capture_confirm_is_pending():
-                        confirm_pending_capture("enter")
-                    elif FILTER_SWITCH_MANUAL_APPLY_ENABLED:
+                    if FILTER_SWITCH_MANUAL_APPLY_ENABLED:
                         apply_selected_filter_mode()
             except Exception:
                 time.sleep(0.2)
@@ -904,18 +872,14 @@ def start_evdev_space_listener():
                 if event.type != ecodes.EV_KEY or event.value != 1:
                     continue
                 if event.code == ecodes.KEY_SPACE:
-                    request_capture_confirmation("space")
+                    trigger_capture_now("space")
                 elif event.code in {ecodes.KEY_UP, ecodes.KEY_KP8}:
                     trigger_filter_cycle(1)
                 elif event.code in {ecodes.KEY_DOWN, ecodes.KEY_KP2}:
                     trigger_filter_cycle(-1)
                 elif event.code in {ecodes.KEY_ENTER, ecodes.KEY_KPENTER}:
-                    if _capture_confirm_is_pending():
-                        confirm_pending_capture("enter")
-                    elif FILTER_SWITCH_MANUAL_APPLY_ENABLED:
+                    if FILTER_SWITCH_MANUAL_APPLY_ENABLED:
                         apply_selected_filter_mode()
-                elif event.code == ecodes.KEY_ESC:
-                    cancel_pending_capture("esc")
         except Exception as exc:
             print(f"Space capture listener: evdev error: {exc}")
         finally:
