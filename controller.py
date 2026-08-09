@@ -1058,7 +1058,6 @@ def build_overlay_filter():
 
         if overlay_text:
             text_x, text_y, box_filter = overlay_layout(OVERLAY_CORNER)
-            chain.append(box_filter)
             if OVERLAY_BLOCKY_MODE:
                 chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.92", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
             else:
