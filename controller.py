@@ -30,6 +30,12 @@ _vintage_mode_lock = threading.Lock()
 _last_filter_switch_ts = 0.0
 _capture_save_lock = threading.Lock()
 _instance_lock_file = None
+_selected_vintage_mode = None
+_capture_confirm_pending = False
+_capture_confirm_lock = threading.Lock()
+_capture_confirm_started_at = 0.0
+_status_overlay_lock = threading.Lock()
+_status_overlay_token = 0
 
 RETRY_INTERVAL_SEC = 2.0
 MAX_RETRY_INTERVAL_SEC = 10.0
@@ -50,6 +56,9 @@ FILTER_SWITCH_COOLDOWN_SEC = max(0.0, env_float("FILTER_SWITCH_COOLDOWN_SEC", 0.
 TRANSITION_COVER_ENABLED = os.getenv("TRANSITION_COVER_ENABLED", "0").strip().lower() not in {"0", "false", "off", "no"}
 FILTER_SWITCH_LIVE_APPLY = os.getenv("FILTER_SWITCH_LIVE_APPLY", "0").strip().lower() not in {"0", "false", "off", "no"}
 CAPTURE_FALLBACK_STOP_PREVIEW = os.getenv("CAPTURE_FALLBACK_STOP_PREVIEW", "0").strip().lower() not in {"0", "false", "off", "no"}
+FILTER_SWITCH_MANUAL_APPLY_ENABLED = os.getenv("FILTER_SWITCH_MANUAL_APPLY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+CAPTURE_CONFIRM_ENABLED = os.getenv("CAPTURE_CONFIRM_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+CAPTURE_CONFIRM_TIMEOUT_SEC = max(0.2, env_float("CAPTURE_CONFIRM_TIMEOUT_SEC", 1.6))
 
 # Filter controls
 VINTAGE_MODE = os.getenv("VINTAGE_MODE", "vhs").strip().lower()  # base | vhs | cyber_glitch | pixel_lofi
@@ -73,11 +82,13 @@ OVERLAY_FONT_COLOR = os.getenv("OVERLAY_FONT_COLOR", "white").strip() or "white"
 OVERLAY_BLOCKY_MODE = os.getenv("OVERLAY_BLOCKY_MODE", "1").strip().lower() not in {"0", "false", "off", "no"}
 OVERLAY_GLOW_ENABLED = os.getenv("OVERLAY_GLOW_ENABLED", "0").strip().lower() in {"1", "true", "on", "yes"}
 OVERLAY_REQUIRE_PIXEL_FONT = os.getenv("OVERLAY_REQUIRE_PIXEL_FONT", "0").strip().lower() in {"1", "true", "on", "yes"}
+STATUS_OVERLAY_ENABLED = os.getenv("STATUS_OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
+STATUS_OVERLAY_FILE = os.getenv("STATUS_OVERLAY_FILE", "/tmp/photobooth_status.txt").strip() or "/tmp/photobooth_status.txt"
 
 # Capture and print controls
 CAPTURE_KEY_ENABLED = os.getenv("CAPTURE_KEY_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
 CAPTURE_COOLDOWN_SEC = max(0.0, env_float("CAPTURE_COOLDOWN_SEC", 1.2))
-CAPTURE_PAUSE_PREVIEW = os.getenv("CAPTURE_PAUSE_PREVIEW", "1").strip().lower() not in {"0", "false", "off", "no"}
+CAPTURE_PAUSE_PREVIEW = os.getenv("CAPTURE_PAUSE_PREVIEW", "0").strip().lower() not in {"0", "false", "off", "no"}
 CAPTURE_SAVE_ENABLED = os.getenv("CAPTURE_SAVE_ENABLED", "1").strip().lower() not in {"0", "false", "off", "no"}
 CAPTURE_SAVE_DIR = os.getenv("CAPTURE_SAVE_DIR", "/home/bran/photobooth/captures").strip() or "/home/bran/photobooth/captures"
 CAPTURE_SAVE_FORMAT = os.getenv("CAPTURE_SAVE_FORMAT", "png").strip().lower() or "png"
@@ -138,6 +149,49 @@ def set_vintage_mode(mode):
         VINTAGE_MODE = normalize_filter_mode(mode)
 
 
+def get_selected_vintage_mode():
+    global _selected_vintage_mode
+    if _selected_vintage_mode is None:
+        _selected_vintage_mode = get_vintage_mode()
+    return normalize_filter_mode(_selected_vintage_mode)
+
+
+def set_selected_vintage_mode(mode):
+    global _selected_vintage_mode
+    _selected_vintage_mode = normalize_filter_mode(mode)
+
+
+def apply_selected_filter_mode():
+    current_mode = get_vintage_mode()
+    selected_mode = get_selected_vintage_mode()
+    if selected_mode == current_mode:
+        print(f"Filter apply: already active ({selected_mode}).")
+        show_status_message(f"Filter active: {selected_mode}", 1.2)
+        return
+
+    with _preview_lock:
+        was_running = _preview_proc is not None and _preview_proc.poll() is None
+        video_device = _current_device
+        profile = {
+            "format": _current_format,
+            "size": _current_size,
+            "framerate": _current_framerate,
+        }
+
+        set_vintage_mode(selected_mode)
+        print(f"Filter mode applied: {current_mode} -> {selected_mode}")
+        show_status_message(f"Filter applied: {selected_mode}", 1.4)
+
+        if not was_running or not video_device or not profile["size"] or not profile["framerate"]:
+            return
+
+        try:
+            restart_preview_after_switch(video_device, profile, selected_mode, current_mode)
+        except Exception as exc:
+            print(f"Filter apply failed: {exc}")
+            raise
+
+
 def cycle_vintage_mode(direction):
     global _last_filter_switch_ts
 
@@ -146,7 +200,7 @@ def cycle_vintage_mode(direction):
         return
     _last_filter_switch_ts = now
 
-    current_mode = get_vintage_mode()
+    current_mode = get_selected_vintage_mode() if FILTER_SWITCH_MANUAL_APPLY_ENABLED else get_vintage_mode()
     if current_mode not in VINTAGE_MODE_SEQUENCE:
         current_index = VINTAGE_MODE_SEQUENCE.index("vhs")
     else:
@@ -155,6 +209,12 @@ def cycle_vintage_mode(direction):
     next_index = (current_index + direction) % len(VINTAGE_MODE_SEQUENCE)
     next_mode = VINTAGE_MODE_SEQUENCE[next_index]
     if next_mode == current_mode:
+        return
+
+    if FILTER_SWITCH_MANUAL_APPLY_ENABLED:
+        set_selected_vintage_mode(next_mode)
+        print(f"Filter selected (pending): {current_mode} -> {next_mode}. Press Enter to apply.")
+        show_status_message(f"Filter selected: {next_mode} | Enter to apply", 2.0)
         return
 
     with _preview_lock:
@@ -166,6 +226,7 @@ def cycle_vintage_mode(direction):
             "framerate": _current_framerate,
         }
         set_vintage_mode(next_mode)
+        set_selected_vintage_mode(next_mode)
         print(f"Filter mode changed: {current_mode} -> {next_mode}")
 
         if not FILTER_SWITCH_LIVE_APPLY:
@@ -178,6 +239,108 @@ def cycle_vintage_mode(direction):
             except Exception as exc:
                 print(f"Filter switch failed: {exc}")
                 raise
+
+
+def _capture_confirm_mark_pending():
+    global _capture_confirm_pending, _capture_confirm_started_at
+    with _capture_confirm_lock:
+        _capture_confirm_pending = True
+        _capture_confirm_started_at = time.time()
+    show_status_message("Capture pending: Enter/Space confirm | Esc cancel", CAPTURE_CONFIRM_TIMEOUT_SEC)
+
+
+def _capture_confirm_clear_pending():
+    global _capture_confirm_pending, _capture_confirm_started_at
+    with _capture_confirm_lock:
+        _capture_confirm_pending = False
+        _capture_confirm_started_at = 0.0
+
+
+def _capture_confirm_is_pending():
+    with _capture_confirm_lock:
+        return _capture_confirm_pending
+
+
+def request_capture_confirmation(source="space"):
+    del source
+    if not CAPTURE_CONFIRM_ENABLED:
+        trigger_capture_now("confirm-disabled")
+        return
+
+    if _capture_in_progress:
+        return
+
+    if _capture_confirm_is_pending():
+        confirm_pending_capture("repeat-space")
+        return
+
+    _capture_confirm_mark_pending()
+    print(f"Capture pending. Press Enter/Space to confirm or Esc to cancel (auto-confirm in {CAPTURE_CONFIRM_TIMEOUT_SEC:.1f}s).")
+
+    started_at = time.time()
+
+    def _auto_confirm():
+        time.sleep(CAPTURE_CONFIRM_TIMEOUT_SEC)
+        with _capture_confirm_lock:
+            if not _capture_confirm_pending:
+                return
+            if _capture_confirm_started_at != started_at:
+                return
+        confirm_pending_capture("auto-confirm")
+
+    threading.Thread(target=_auto_confirm, daemon=True).start()
+
+
+def confirm_pending_capture(source="enter"):
+    del source
+    if not _capture_confirm_is_pending():
+        return
+    _capture_confirm_clear_pending()
+    show_status_message("Capture confirmed", 1.0)
+    trigger_capture_now("confirmed")
+
+
+def cancel_pending_capture(source="esc"):
+    del source
+    if not _capture_confirm_is_pending():
+        return
+    _capture_confirm_clear_pending()
+    print("Capture canceled.")
+    show_status_message("Capture canceled", 1.0)
+
+
+def _write_status_overlay(text):
+    if not STATUS_OVERLAY_ENABLED:
+        return
+    try:
+        os.makedirs(os.path.dirname(STATUS_OVERLAY_FILE) or "/tmp", exist_ok=True)
+        with open(STATUS_OVERLAY_FILE, "w", encoding="utf-8") as handle:
+            handle.write((text or "").strip())
+    except Exception:
+        pass
+
+
+def show_status_message(text, duration_sec=0.0):
+    global _status_overlay_token
+    if not STATUS_OVERLAY_ENABLED:
+        return
+
+    with _status_overlay_lock:
+        _status_overlay_token += 1
+        token = _status_overlay_token
+    _write_status_overlay(text)
+
+    if duration_sec <= 0:
+        return
+
+    def _clear_later(local_token):
+        time.sleep(duration_sec)
+        with _status_overlay_lock:
+            if local_token != _status_overlay_token:
+                return
+        _write_status_overlay("")
+
+    threading.Thread(target=_clear_later, args=(token,), daemon=True).start()
 
 # Analog capture cards are usually most stable with SD resolutions.
 SOURCE_PROFILES = [
@@ -468,7 +631,7 @@ def print_image_bytes(image_bytes):
         raise
 
 
-def trigger_capture(source="space"):
+def trigger_capture_now(source="space"):
     del source
     global _capture_in_progress, _last_capture_ts
 
@@ -594,7 +757,7 @@ def start_tty_space_listener():
                     continue
                 ch = sys.stdin.read(1)
                 if ch == " ":
-                    trigger_capture("space")
+                    request_capture_confirmation("space")
                 elif ch == "\x1b":
                     seq = ""
                     for _ in range(2):
@@ -607,6 +770,13 @@ def start_tty_space_listener():
                         trigger_filter_cycle(1)
                     elif seq == "[B":
                         trigger_filter_cycle(-1)
+                    else:
+                        cancel_pending_capture("esc")
+                elif ch in {"\n", "\r"}:
+                    if _capture_confirm_is_pending():
+                        confirm_pending_capture("enter")
+                    elif FILTER_SWITCH_MANUAL_APPLY_ENABLED:
+                        apply_selected_filter_mode()
             except Exception:
                 time.sleep(0.2)
 
@@ -682,11 +852,18 @@ def start_evdev_space_listener():
                 if event.type != ecodes.EV_KEY or event.value != 1:
                     continue
                 if event.code == ecodes.KEY_SPACE:
-                    trigger_capture("space")
+                    request_capture_confirmation("space")
                 elif event.code in {ecodes.KEY_UP, ecodes.KEY_KP8}:
                     trigger_filter_cycle(1)
                 elif event.code in {ecodes.KEY_DOWN, ecodes.KEY_KP2}:
                     trigger_filter_cycle(-1)
+                elif event.code in {ecodes.KEY_ENTER, ecodes.KEY_KPENTER}:
+                    if _capture_confirm_is_pending():
+                        confirm_pending_capture("enter")
+                    elif FILTER_SWITCH_MANUAL_APPLY_ENABLED:
+                        apply_selected_filter_mode()
+                elif event.code == ecodes.KEY_ESC:
+                    cancel_pending_capture("esc")
         except Exception as exc:
             print(f"Space capture listener: evdev error: {exc}")
         finally:
@@ -771,6 +948,24 @@ def drawtext_filter(text, x, y, size, color, border_color="black@0.8", borderw=2
     return "drawtext=" + ":".join(parts)
 
 
+def drawtext_textfile_filter(textfile_path, x, y, size, color, border_color="black@0.8", borderw=2, font_name=None, font_file=None):
+    font_spec = find_fontfile(font_name, font_file)
+    safe_path = textfile_path.replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'")
+    parts = [
+        f"textfile='{safe_path}'",
+        "reload=1",
+        f"x={x}",
+        f"y={y}",
+        f"fontsize={size}",
+        f"fontcolor={color}",
+        f"borderw={borderw}",
+        f"bordercolor={border_color}",
+    ]
+    if font_spec:
+        parts.insert(0, font_spec)
+    return "drawtext=" + ":".join(parts)
+
+
 def normalize_overlay_position(position):
     aliases = {
         "top-center": "middle-top",
@@ -833,6 +1028,10 @@ def build_overlay_filter():
                     chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#3fd7ff@0.14", "#3fd7ff@0.10", 8, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
                     chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, "#61e3ff@0.22", "#3fd7ff@0.16", 4, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
                 chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
+
+    if STATUS_OVERLAY_ENABLED:
+        chain.append("drawbox=x=18:y=12:w=iw-36:h=46:color=black@0.22:t=fill")
+        chain.append(drawtext_textfile_filter(STATUS_OVERLAY_FILE, "30", "20", max(18, int(OVERLAY_FONT_SIZE * 0.6)), "white", "black@0.95", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
 
     if not chain:
         return None
@@ -1220,6 +1419,7 @@ def start_with_retries(reason):
 
 def main():
     kill_stale_preview_processes()
+    _write_status_overlay("")
 
     # Keep trying until a camera source appears and preview starts.
     if not start_with_retries("startup"):
@@ -1228,6 +1428,7 @@ def main():
     if _shutdown:
         return 0
 
+    show_status_message(f"Filter active: {get_vintage_mode()} | Up/Down select, Enter apply", 2.2)
     start_capture_listeners()
     print("Live preview running. Press Ctrl+C to stop.")
 
