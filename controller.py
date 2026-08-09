@@ -809,20 +809,61 @@ def start_evdev_space_listener():
     if not CAPTURE_KEY_ENABLED:
         return
 
-    device_path = os.getenv("KEYBOARD_EVENT_DEVICE", "").strip()
-    if not device_path:
-        print("Space capture listener: KEYBOARD_EVENT_DEVICE not set; skipping evdev listener.")
-        return
-
     try:
         from evdev import InputDevice, ecodes
     except Exception as exc:
         print(f"Space capture listener: evdev unavailable ({exc}); skipping evdev listener.")
         return
 
-    if not os.path.exists(device_path):
-        print(f"Space capture listener: device not found: {device_path}")
+    target_codes = {
+        ecodes.KEY_SPACE,
+        ecodes.KEY_UP,
+        ecodes.KEY_DOWN,
+        ecodes.KEY_KP8,
+        ecodes.KEY_KP2,
+        ecodes.KEY_ENTER,
+        ecodes.KEY_KPENTER,
+    }
+
+    requested_path = os.getenv("KEYBOARD_EVENT_DEVICE", "").strip()
+    candidate_paths = []
+
+    if requested_path:
+        if os.path.exists(requested_path):
+            candidate_paths.append(requested_path)
+        else:
+            print(f"Space capture listener: configured device not found: {requested_path}; attempting auto-detect.")
+
+    scored_candidates = []
+    for event_path in sorted(glob.glob("/dev/input/event*")):
+        if event_path in candidate_paths:
+            continue
+        dev = None
+        try:
+            dev = InputDevice(event_path)
+            key_caps = set(dev.capabilities().get(ecodes.EV_KEY, []))
+            score = len(key_caps & target_codes)
+            if score > 0:
+                scored_candidates.append((score, event_path))
+        except Exception:
+            pass
+        finally:
+            if dev is not None:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+
+    scored_candidates.sort(key=lambda item: (-item[0], item[1]))
+    for _, event_path in scored_candidates:
+        if event_path not in candidate_paths:
+            candidate_paths.append(event_path)
+
+    if not candidate_paths:
+        print("Space capture listener: no usable keyboard event device found.")
         return
+
+    device_path = candidate_paths[0]
 
     def _listen():
         dev = None
@@ -839,21 +880,14 @@ def start_evdev_space_listener():
                     print(f"Capture/filter listener: failed to grab {device_path} exclusively ({exc}); keys may leak to desktop")
 
                 if KEYBOARD_GRAB_ALL_DEVICES:
-                    target_codes = {
-                        ecodes.KEY_SPACE,
-                        ecodes.KEY_UP,
-                        ecodes.KEY_DOWN,
-                        ecodes.KEY_KP8,
-                        ecodes.KEY_KP2,
-                        ecodes.KEY_ESC,
-                    }
+                    grab_target_codes = set(target_codes) | {ecodes.KEY_ESC}
                     for extra_path in sorted(glob.glob("/dev/input/event*")):
                         if extra_path == device_path:
                             continue
                         try:
                             extra_dev = InputDevice(extra_path)
                             key_caps = set(extra_dev.capabilities().get(ecodes.EV_KEY, []))
-                            if not (key_caps & target_codes):
+                            if not (key_caps & grab_target_codes):
                                 extra_dev.close()
                                 continue
                             extra_dev.grab()
