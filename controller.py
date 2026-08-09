@@ -1068,7 +1068,6 @@ def build_overlay_filter():
                 chain.append(drawtext_filter(overlay_text, text_x, text_y, OVERLAY_FONT_SIZE, OVERLAY_FONT_COLOR, "black@0.75", 1, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
 
     if STATUS_OVERLAY_ENABLED:
-        chain.append("drawbox=x=18:y=12:w=iw-36:h=46:color=black@0.22:t=fill")
         chain.append(drawtext_textfile_filter(STATUS_OVERLAY_FILE, "30", "20", max(18, int(OVERLAY_FONT_SIZE * 0.6)), "white", "black@0.95", 2, OVERLAY_FONT_NAME, OVERLAY_FONT_FILE))
 
     if not chain:
