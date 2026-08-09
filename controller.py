@@ -278,9 +278,9 @@ def request_capture_confirmation(source="space"):
         return
 
     _capture_confirm_mark_pending()
+    with _capture_confirm_lock:
+        started_at = _capture_confirm_started_at
     print(f"Capture pending. Press Enter/Space to confirm or Esc to cancel (auto-confirm in {CAPTURE_CONFIRM_TIMEOUT_SEC:.1f}s).")
-
-    started_at = time.time()
 
     def _auto_confirm():
         time.sleep(CAPTURE_CONFIRM_TIMEOUT_SEC)
