@@ -707,6 +707,7 @@ def trigger_capture_now(source="space"):
 
                 print("Capturing frame...")
                 captured_bytes = None
+                first_capture_exc = None
 
                 # First try to capture without interrupting preview to avoid desktop flash.
                 if was_running:
@@ -718,13 +719,19 @@ def trigger_capture_now(source="space"):
                             attempts=4,
                         )
                     except Exception as exc:
-                        if not CAPTURE_FALLBACK_STOP_PREVIEW or not should_retry_capture_with_paused_preview(exc):
+                        first_capture_exc = exc
+                        if not should_retry_capture_with_paused_preview(exc):
                             raise
+                        print(f"Live capture retry needed ({exc}); attempting paused-preview fallback.")
 
                 if captured_bytes is None:
-                    cover_proc = start_transition_cover() if (CAPTURE_PAUSE_PREVIEW and was_running and CAPTURE_FALLBACK_STOP_PREVIEW) else None
+                    should_pause_preview = was_running and (
+                        CAPTURE_FALLBACK_STOP_PREVIEW
+                        or (first_capture_exc is not None and should_retry_capture_with_paused_preview(first_capture_exc))
+                    )
+                    cover_proc = start_transition_cover() if (CAPTURE_PAUSE_PREVIEW and should_pause_preview) else None
                     try:
-                        if CAPTURE_PAUSE_PREVIEW and was_running and CAPTURE_FALLBACK_STOP_PREVIEW:
+                        if should_pause_preview:
                             stop_preview()
                             # Ensure ffplay/cvlc fully releases /dev/video* before one-shot capture.
                             kill_stale_preview_processes()
@@ -737,7 +744,7 @@ def trigger_capture_now(source="space"):
                             attempts=4,
                         )
 
-                        if CAPTURE_PAUSE_PREVIEW and was_running and CAPTURE_FALLBACK_STOP_PREVIEW and not _shutdown:
+                        if should_pause_preview and not _shutdown:
                             start_preview(video_device, profile)
                     finally:
                         stop_transition_cover(cover_proc)
